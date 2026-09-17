@@ -1,6 +1,6 @@
 # iOS OTA
 
-Documentation revision: `1.4.0`.
+Documentation revision: `1.4.1`.
 
 Mac background service: **Lyo Nodus iOS OTA** (`lyo-nodus-ios-ota`).
 The existing MacBook pairing remains **iOS OTA**. The independently paired
@@ -112,7 +112,7 @@ configuration; do not recreate the profile just to change its directory name.
 ### 2. Install the bridge
 
 ```sh
-git clone https://github.com/zjz-connect/ios-ota.git
+git clone https://github.com/lyo-eos/ios-ota.git
 cd ios-ota
 ./scripts/install.sh
 ```
@@ -299,7 +299,7 @@ iOS OTA 会在原路径读取它，不会将其复制到仓库或 profile。
 ### 2. 安装 bridge
 
 ```sh
-git clone https://github.com/zjz-connect/ios-ota.git
+git clone https://github.com/lyo-eos/ios-ota.git
 cd ios-ota
 ./scripts/install.sh
 ```
@@ -433,9 +433,16 @@ network boundary and separately recorded physical acceptance.
 
 The prepared `1.2.0-capture-preview.8` candidate supports a screenshot-only endpoint during `run-tests --capture-bind-address TAILNET_IP`, allowing native in-flight XCTest captures without blocking screenshots behind the gesture. It is not activated by building or testing. See [Remote Capture](docs/remote-capture.md) for its scope and image verification.
 
+## Source delivery
+
+GitHub (`lyo-eos/ios-ota`) is the primary repository; `/Volumes/NAS/Git/ios-ota.git`
+is the second backup. The current Location work uses `lyo-proxy-location` on both.
+The same source commit must reach both remotes. Profiles, pairing, certificates,
+coordinates and generated test receipts remain outside Git.
+
 ## System location
 
-Version `1.4.0` keeps the requested coordinate for the daemon lifetime until
+Version `1.4.1` keeps the requested coordinate for the daemon lifetime until
 explicit Restore. App suspension, slow discovery and an inner-service failure
 do not discard it. Set/Restore return accepted state (HTTP 202); the daemon
 applies and maintains it, exposes applying/recovering/restoring, and reports

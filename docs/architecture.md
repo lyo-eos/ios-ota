@@ -1,6 +1,6 @@
 # iOS OTA Architecture
 
-Document revision: `1.4.0`
+Document revision: `1.4.1`
 
 Revised: `2026-09-17`
 
@@ -38,6 +38,9 @@ reapplies it. The target lasts until explicit Restore or daemon shutdown, not
 until the phone HTTP request, foreground session or one refresh ends. Nothing is
 persisted across daemon restarts.
 
+The Instruments socket belongs to the retained location driver. Opening uses
+a bounded cancellation link which is detached after successful negotiation;
+finishing a command never cancels that socket lifetime. Driver Close ends it.
 Each worker attempt has one 60-second context covering fresh RSD identity,
 Instruments channel negotiation and the command acknowledgement. Link Core
 propagates that context through channel creation and method calls, including
@@ -360,3 +363,18 @@ The inspected 1.4.0 binary was activated on MacBook using the existing profile,
 LaunchAgent, certificate, token and pairing. The new daemon acquired generation
 1. Live Restore and target-persistence acceptance are in progress; source tests
 and service readiness do not establish physical CoreLocation acceptance.
+
+The intermediate 1.4.0 live Restore was accepted in 0.046 seconds and reached
+idle after 32.292 seconds during an OTA app transfer. Subsequent lifecycle review
+found that Link Core's context-bound socket still inherited the attempt lifetime;
+that ownership defect is removed in 1.4.1. A real TCP/DTX fixture must verify the
+same socket accepts further commands after the opening and first-command
+contexts are cancelled. This intermediate release is not persistent acceptance.
+
+The 1.4.1 complete test entry passed, including the real TCP/DTX lifetime test.
+The Instruments and DTX location cases also passed under the race detector.
+The existing MacBook LaunchAgent now runs the inspected 1.4.1 binary. Activation
+waited for the old job to finish removal before bootstrap; the profile, pairing
+and TLS authority were preserved. The current target was captured immediately
+before activation and submitted to the new daemon. Physical retention is being
+observed separately.
