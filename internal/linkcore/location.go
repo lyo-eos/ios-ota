@@ -98,19 +98,19 @@ func (s *locationSession) lost() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.driver != nil || s.state.Phase == "active" {
-		s.fail("定位连接已中断，请重新连接主机后恢复定位。")
+		s.fail("Location connection lost. Reconnect the host to restore your location.")
 	}
 }
 func (s *locationSession) set(ctx context.Context, lat, lon float64) error {
 	if !validLocation(lat, lon) {
-		return errors.New("坐标无效。")
+		return errors.New("Invalid coordinates.")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.driver == nil {
 		driver, err := s.open(ctx)
 		if err != nil {
-			s.fail("无法打开手机定位服务。")
+			s.fail("Unable to open the iPhone location service.")
 			return errors.New(s.state.Error)
 		}
 		s.driver = driver
@@ -120,7 +120,7 @@ func (s *locationSession) set(ctx context.Context, lat, lon float64) error {
 	driver := s.driver
 	err := locationCall(ctx, driver, func() error { return driver.StartSimulateLocation(lat, lon) })
 	if err != nil {
-		s.fail("定位命令未确认，请恢复真实定位。")
+		s.fail("Location change was not confirmed. Restore your real location.")
 		return errors.New(s.state.Error)
 	}
 	s.state = LocationState{Phase: "active", Latitude: &lat, Longitude: &lon, CommandTime: started}
@@ -132,14 +132,14 @@ func (s *locationSession) clear(ctx context.Context) error {
 	if s.driver == nil {
 		driver, err := s.open(ctx)
 		if err != nil {
-			s.fail("无法连接手机，恢复命令尚未发送。")
+			s.fail("Unable to connect to iPhone. The restore command was not sent.")
 			return errors.New(s.state.Error)
 		}
 		s.driver = driver
 	}
 	err := locationCall(ctx, s.driver, s.driver.StopSimulateLocation)
 	if err != nil {
-		s.fail("恢复命令未确认，请检查手机定位。")
+		s.fail("Location restore was not confirmed. Check the iPhone location.")
 		return errors.New(s.state.Error)
 	}
 	s.driver = nil
@@ -162,7 +162,7 @@ func (s *locationSession) pulse(ctx context.Context) {
 				err := locationCall(callCtx, driver, func() error { return driver.StartSimulateLocation(lat, lon) })
 				cancel()
 				if err != nil {
-					s.fail("定位连接已中断，请检查手机定位。")
+					s.fail("Location connection lost. Check the iPhone location.")
 				}
 			}
 			s.mu.Unlock()

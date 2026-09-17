@@ -2,6 +2,7 @@ package linkcore
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -79,15 +80,7 @@ func ConfigureLocation(profile, listen, output string) error {
 	if err != nil {
 		return err
 	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return err
-	}
-	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "iOS OTA"},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().AddDate(1, 0, 0),
-		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses: []net.IP{net.ParseIP(host)}, BasicConstraintsValid: true}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	der, err := locationCertificate(key, host)
 	if err != nil {
 		return err
 	}
@@ -118,6 +111,90 @@ func ConfigureLocation(profile, listen, output string) error {
 	}
 	return nil
 }
+func locationCertificate(key crypto.Signer, host string) ([]byte, error) {
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, err
+	}
+	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "iOS OTA"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().AddDate(1, 0, 0),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses: []net.IP{net.ParseIP(host)}, BasicConstraintsValid: true}
+	return x509.CreateCertificate(rand.Reader, template, template, key.Public(), key)
+}
+
+// RefreshLocation changes only the public certificate. Existing credentials and
+// phone pairing remain owned by their current files; the caller restarts service.
+func RefreshLocation(profile, output string) error {
+	config, err := LoadConfig(profile)
+	if err != nil {
+		return err
+	}
+	if config.Location == nil {
+		return errors.New("location is not configured")
+	}
+	path := config.Location.Credentials
+	if err := requirePrivateRegularFile(path, "location_credentials_missing", "location_credentials_permissions"); err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var credentials locationCredentials
+	if err := json.Unmarshal(data, &credentials); err != nil {
+		return err
+	}
+	if len(credentials.Token) != 43 {
+		return errors.New("invalid location credential")
+	}
+	pair, err := tls.X509KeyPair([]byte(credentials.Certificate), []byte(credentials.PrivateKey))
+	if err != nil {
+		return err
+	}
+	key, ok := pair.PrivateKey.(crypto.Signer)
+	if !ok {
+		return errors.New("invalid location signing key")
+	}
+	host, _, _ := net.SplitHostPort(config.Location.Listen)
+	der, err := locationCertificate(key, host)
+	if err != nil {
+		return err
+	}
+	credentials.Certificate = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	digest := sha256.Sum256(der)
+	connection := LocationConnection{URL: "https://" + config.Location.Listen, CertificateSHA256: hex.EncodeToString(digest[:]), Token: credentials.Token}
+	if err := writeLocationFile(output, connection); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(output)
+		}
+	}()
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".location-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(temporary.Name())
+	defer temporary.Close()
+	if err := json.NewEncoder(temporary).Encode(credentials); err != nil {
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary.Name(), path); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
 func startLocationHTTPS(ctx context.Context, config LocationConfig, session *locationSession, active func() bool) (*http.Server, error) {
 	if err := config.validate(); err != nil {
 		return nil, err
@@ -139,6 +216,17 @@ func startLocationHTTPS(ctx context.Context, config LocationConfig, session *loc
 	cert, err := tls.X509KeyPair([]byte(credentials.Certificate), []byte(credentials.PrivateKey))
 	if err != nil {
 		return nil, err
+	}
+	host, _, _ := net.SplitHostPort(config.Listen)
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return nil, err
+	}
+	if err := leaf.VerifyHostname(host); err != nil {
+		return nil, errors.New("location certificate does not match the listener IP; run refresh-location")
+	}
+	if time.Now().Before(leaf.NotBefore) || !time.Now().Before(leaf.NotAfter) {
+		return nil, errors.New("location certificate is not valid; run refresh-location")
 	}
 	listener, err := tls.Listen("tcp", config.Listen, &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}})
 	if err != nil {

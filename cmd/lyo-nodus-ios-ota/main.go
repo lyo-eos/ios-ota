@@ -206,9 +206,27 @@ func launchAgent(arguments []string) error {
 
 func run(arguments []string) error {
 	if len(arguments) == 0 {
-		return errors.New("command required: configure, configure-location, doctor, serve, status, watch, install, uninstall, stop, screenshot, run-tests, launch-agent, version")
+		return errors.New("command required: configure, configure-location, refresh-location, doctor, serve, status, watch, install, uninstall, stop, screenshot, run-tests, launch-agent, version")
 	}
 	switch arguments[0] {
+	case "refresh-location":
+		flags := flag.NewFlagSet("refresh-location", flag.ContinueOnError)
+		profile := flags.String("profile", "", "absolute profile path")
+		output := flags.String("output", "", "new private connection document")
+		if err := flags.Parse(arguments[1:]); err != nil {
+			return err
+		}
+		if err := required(*profile, "--profile"); err != nil {
+			return err
+		}
+		if err := required(*output, "--output"); err != nil {
+			return err
+		}
+		if err := linkcore.RefreshLocation(*profile, *output); err != nil {
+			return err
+		}
+		emit(map[string]any{"ok": true, "event": "location_refreshed"})
+		return nil
 	case "configure-location":
 		flags := flag.NewFlagSet("configure-location", flag.ContinueOnError)
 		profile := flags.String("profile", "", "absolute profile path")

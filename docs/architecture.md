@@ -1,8 +1,8 @@
 # iOS OTA Architecture
 
-Document revision: `1.3.1-design.2`
+Document revision: `1.3.2`
 
-Revised: `2026-09-12`
+Revised: `2026-09-17`
 
 ## Decision
 
@@ -39,6 +39,15 @@ credential file supplies a certificate and a random device-scoped bearer token.
 `configure-location` exports URL, certificate SHA-256 and token for App import.
 Only GET/PUT/DELETE `/v1/location` are accepted. Credentials and coordinates are
 not logged. Existing profile pairing is reused; no new iPhone VPN is created.
+
+`refresh-location --profile ... --output ...` reissues the location certificate
+for the profile's current listener IP and exports a new private connection
+document. It preserves the existing private key, bearer token, pairing and
+profile. Stop the daemon before refreshing, then restart and import the new
+document on the phone. Startup rejects a certificate whose IP or validity does
+not match the configured listener, instead of presenting an unusable HTTPS
+endpoint as ready. Location errors are English. Certificate renewal and an
+authenticated state read are separate from a real location set/restore test.
 
 Set acknowledgement, fresh simulated CoreLocation, persistence with another
 app foreground, and fresh real location after clear are distinct evidence.
@@ -268,3 +277,7 @@ The host accepts only pinned TLS 1.3 requests from the authenticated client.
 The phone needs a narrowly scoped ATS exception for Tailnet IPv4 because iOS
 17+ otherwise disallows relaxing IP-certificate trust to this private anchor.
 No phone-side VPN configuration is created by location.
+
+### Location renewal acceptance (2026-09-17)
+
+`go test -race ./internal/linkcore ./cmd/lyo-nodus-ios-ota` passed. The service was upgraded to 1.3.2 and its existing certificate refreshed for 100.87.87.50:61443, preserving the key, token and device profile. Normal certificate/hostname verification and authenticated GET returned HTTP 200 with phase idle. The owner-only connection document was staged into the installed phone app Documents/lyo-proxy-location.json through its paired CoreDevice channel. Phone import and a fresh system-location mutation were not exercised.

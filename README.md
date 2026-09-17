@@ -430,6 +430,12 @@ The prepared `1.2.0-capture-preview.8` candidate supports a screenshot-only endp
 
 ## System location
 
+Version `1.3.2` adds `refresh-location --profile "$profile" --output
+"/absolute/private/connection.json"` for a changed host Tailnet IP or certificate
+renewal. It preserves the existing key, token and phone pairing. Stop the daemon,
+refresh, restart it, and import the new document on the phone. Startup validates
+the certificate against the configured listener IP.
+
 Version `1.3.0-location-preview.1` adds one host-owned Instruments location
 session over the existing paired tunnel. Lyo Proxy controls it using TLS 1.3,
 a pinned certificate and a phone-scoped credential. No new phone VPN is created.
