@@ -1,7 +1,10 @@
 # iOS OTA
 
+Documentation revision: `1.3.3`.
+
 Mac background service: **Lyo Nodus iOS OTA** (`lyo-nodus-ios-ota`).
-The iPhone pairing entry remains exactly **iOS OTA**.
+The existing MacBook pairing remains **iOS OTA**. The independently paired
+Mac mini entry is **iOS OTA Mac Mini**, as selected by the owner.
 
 [English](#english) · [中文](#中文)
 
@@ -57,7 +60,8 @@ Reuse an existing trusted, owner-only RemotePairing record. Only when creating
 or explicitly replacing the component pairing, use an isolated environment with
 `pymobiledevice3 11.12.4` and its upstream device-initiated pairing API. Keep the
 phone unlocked on the same LAN for this bootstrap. Preserve the normal Xcode
-pairing; the component must have its own identity and the exact name **iOS OTA**.
+pairing; each bridge must have its own identity. This example creates the
+**iOS OTA Mac Mini** entry on the Mac mini; the MacBook keeps **iOS OTA**.
 
 ```sh
 python3 - <<'PY'
@@ -67,11 +71,11 @@ from pymobiledevice3.remote.tunnel_service import PairableHostInfo, serve_pairab
 os.umask(0o077)
 async def main():
     info = PairableHostInfo(
-        name="iOS OTA",
+        name="iOS OTA Mac Mini",
         model=subprocess.check_output(["sysctl", "-n", "hw.model"], text=True).strip(),
         identifier=str(uuid.uuid4()).upper(),
     )
-    print("Select iOS OTA in the iPhone's Paired Macs settings.", flush=True)
+    print("Select iOS OTA Mac Mini in the iPhone's Paired Macs settings.", flush=True)
     result = await serve_pairable_host(
         info, timeout=240,
         pin_callback=lambda pin: print("Pairing code:", pin, flush=True),
@@ -82,7 +86,7 @@ asyncio.run(main())
 PY
 ```
 
-Select **iOS OTA** on the intended phone and enter the short-lived code. Confirm
+Select **iOS OTA Mac Mini** on the intended phone and enter the short-lived code. Confirm
 the returned device identity before using its record. Do not retain the code.
 The API persists the new identity and keys together; subsequent daemon
 connections reuse them. Do not run this command for normal reconnection.
@@ -100,7 +104,7 @@ reads it in place and never copies it into the repository or profile.
 The rename to iOS OTA does not itself invalidate pairing. If `status` reports
 `pair_verify_failed`, restore trusted phone connectivity and repeat the bootstrap
 for that iPhone. `doctor` checks local prerequisites, not successful pair
-verification. Acceptance requires **iOS OTA** to remain in the phone's paired
+verification. Acceptance requires the selected bridge name to remain in the phone's paired
 list and the daemon to remain `active` after the bootstrap exits, not only a
 success receipt or momentary connection. Preserve an existing profile, its adjacent socket and any location
 configuration; do not recreate the profile just to change its directory name.
@@ -273,9 +277,10 @@ Xcode 构建和签名
 
 如果已有可信且仅限当前用户访问的 RemotePairing record，直接复用。
 只有首次创建或明确重建组件配对时，才执行上方英文第 1 节的 upstream API
-命令：在隔离环境使用 `pymobiledevice3 11.12.4`，广播名称为 **iOS OTA**，
-并创建独立的组件身份。手机保持解锁、与 Mac 在同一局域网，在已配对 Mac
-设置中选择 **iOS OTA** 并输入临时验证码。保留原有 **MacBook Air** Xcode
+命令：在隔离环境使用 `pymobiledevice3 11.12.4`。Mac mini 的广播名称为
+**iOS OTA Mac Mini**，并创建独立的组件身份；MacBook 已有的 **iOS OTA**
+配对保持不变。手机保持解锁、与 Mac 在同一局域网，在已配对 Mac
+设置中选择 **iOS OTA Mac Mini** 并输入临时验证码。保留原有 **MacBook Air** Xcode
 配对，正常重连不重新生成身份，不重置全部信任。
 
 仅设置 `pair-host --name` 仍会复用由主机名推导的身份，不等于独立配对。
@@ -288,7 +293,7 @@ iOS OTA 会在原路径读取它，不会将其复制到仓库或 profile。
 更名本身不会使配对失效。如果 `status` 返回 `pair_verify_failed`，先恢复
 可信的手机连接，再对该 iPhone 重做上述配对。`doctor` 通过只代表前置检查
 通过，不代表配对认证成功。需确认配对程序退出后，手机已配对列表保留
-**iOS OTA**，且 daemon 持续 `active`；短暂连上不算验收。现有 profile、相邻 socket 和 location 配置保留
+选定 bridge 的名称，且 daemon 持续 `active`；短暂连上不算验收。现有 profile、相邻 socket 和 location 配置保留
 原位，不要仅为更改目录名而重新运行 `configure`。
 
 ### 2. 安装 bridge

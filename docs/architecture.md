@@ -1,6 +1,6 @@
 # iOS OTA Architecture
 
-Document revision: `1.3.2`
+Document revision: `1.3.3`
 
 Revised: `2026-09-17`
 
@@ -22,9 +22,11 @@ install/remove apps, read files, or invoke arbitrary developer services.
 The installed Mac service's canonical display name is **Lyo Nodus iOS OTA**,
 with technical slug `lyo-nodus-ios-ota`. Its executable, LaunchAgent label,
 plist basename and log basenames use that exact slug. The repository remains
-`ios-ota`; Link Core retains its upstream identity. The phone's separately
-persisted pairing name remains exactly **iOS OTA** and its identity is not
-rotated by this service release.
+`ios-ota`; Link Core retains its upstream identity. The MacBook's separately
+persisted pairing name remains **iOS OTA** and its identity is not rotated.
+The Mac mini has its own identity with the owner-selected phone pairing name
+**iOS OTA Mac Mini**. These are per-host pairing labels, not alternate service
+names or executable aliases.
 
 The daemon owns one LocationSimulation connection using Link Core's existing
 Instruments API. It uses the same paired tunnel, with fresh RSD identity checks.
@@ -94,8 +96,8 @@ consumers already monitor its socket. This is one configured socket, not an alia
 Renaming the service does not rotate its RemotePairing identity. A local record
 passing validation and an open listener are prerequisites, not authentication
 proof. On `pair_verify_failed`, use the explicitly authorized device-initiated
-bootstrap documented in README. The exact component name is **iOS OTA** and its
-host identifier is independent of the Mac hostname and Xcode pairing. The
+bootstrap documented in README. Use the selected host's pairing label and a
+host identifier independent of the Mac hostname and Xcode pairing. The
 upstream exchange persists that identifier, IRK and keypair together; normal
 acquisition reuses the record without changing identity. Preserve the selected
 phone's configured profile and location credentials. Pairing acceptance requires
@@ -104,6 +106,49 @@ session to survive bootstrap exit. Pairing, Xcode reachability, installation
 readback and capture acceptance remain separate observations.
 
 ## Build and install ownership
+
+### Independent Mac bridges
+
+MacBook Air and Mac mini may each install the existing 1.3.2 bridge binary as
+their own per-user service. Each host owns a separate profile, control socket,
+RemotePairing identity and key material. Pair the Mac mini independently;
+do not copy the MacBook's pairing record or alter its trusted identity.
+Installing a binary does not establish a second authenticated bridge.
+
+Mac mini is intended as the persistent host while MacBook Air remains available
+for development and OS reinstallation. Select the host explicitly through its
+local CLI, using SSH when operating the other Mac. There is no automatic host
+discovery, failover or shared operation lock between the two daemons. Send app
+lifecycle and location operations through one selected host at a time; concurrent
+phone operations from separate bridges are not an accepted capability.
+
+Each host needs its own first authenticated session while the iPhone exposes
+RemotePairing on Wi-Fi. A second bridge does not provide cold acquisition on
+pure cellular networking or preserve a session interrupted by replacement of
+the phone's own VPN app. Lyo Proxy currently stores one Location host connection;
+changing that host requires an explicit profile import after the target bridge
+has been paired and its Location endpoint configured.
+
+Mac mini deployment acceptance must separately record binary installation,
+independent pairing, LaunchAgent activation and an authenticated active session.
+Do not disturb the MacBook bridge to validate installation on the Mac mini.
+
+On September 17, 2026, the existing 1.3.2 binary was installed on Mac mini.
+Device-initiated pairing used pymobiledevice3 11.12.4 in an isolated environment,
+a fresh host identifier and the requested **iOS OTA Mac Mini** name. The saved
+record matched that identity and retained its host IRK and intended phone ID.
+Its own profile and pairing record are mode 0600. The per-user LaunchAgent has
+RunAtLoad and KeepAlive enabled and reported running. After the pairing process
+exited, Mac mini reported `active`, generation 1, while MacBook Air remained
+`active`, generation 3, with its previous counters unchanged. No app install,
+location operation, VPN toggle or MacBook service restart was performed.
+
+The owner reported that **iOS OTA Mac Mini** was absent from the phone's paired
+Mac list after pairing. The outgoing handshake and signed pairing information
+both use the requested name, but phone-side list retention is not accepted.
+A refreshed list readback is pending; successful transport authentication must
+not be reported as proof of the phone's display or attributed to an iOS display
+bug without evidence. Keep both working identities intact during diagnosis.
 
 | Stage | Authority |
 | --- | --- |
