@@ -70,13 +70,13 @@ func NewDaemon(config Config, profilePath string) (*Daemon, error) {
 		},
 		validateApp: ValidateApp,
 	}
-	daemon.location = &locationSession{open: func(ctx context.Context) (locationDriver, error) {
+	daemon.location = newLocationSession(func(ctx context.Context) (locationDriver, error) {
 		session := daemon.currentSession()
 		if session == nil {
 			return nil, errors.New("phone tunnel is not active")
 		}
 		return session.OpenLocation(ctx)
-	}}
+	})
 	return daemon, nil
 }
 
@@ -370,13 +370,10 @@ func (d *Daemon) Serve(parent context.Context) error {
 		go d.handleConnection(ctx, connection)
 	}
 	d.setState(StateStopping, "")
-	if d.location.snapshot(d.currentSession() != nil).Latitude != nil {
-		cleanup, end := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := d.location.clear(cleanup); err != nil {
-			slog.Warn(ServiceName + " location clear was not acknowledged")
-		}
-		end()
+	if d.config.Location != nil {
+		<-d.location.done
 	}
+
 	d.operationMu.Lock()
 	if session := d.currentSession(); session != nil {
 		_ = session.Close()

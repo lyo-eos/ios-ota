@@ -274,18 +274,16 @@ func locationHandler(owner context.Context, token string, session *locationSessi
 				http.Error(w, "invalid coordinate", 400)
 				return
 			}
-			// Once accepted, a mutation belongs to the host, not the phone HTTP request.
-			ctx, cancel := context.WithTimeout(owner, 10*time.Second)
-			err = session.set(ctx, *coordinate.Latitude, *coordinate.Longitude)
-			cancel()
+			// Acceptance commits intent; the host worker owns execution and recovery.
+			err = session.set(*coordinate.Latitude, *coordinate.Longitude)
+			code = http.StatusAccepted
 		} else if r.Method == http.MethodDelete {
 			if r.ContentLength != 0 {
 				http.Error(w, "unexpected body", 400)
 				return
 			}
-			ctx, cancel := context.WithTimeout(owner, 10*time.Second)
-			err = session.clear(ctx)
-			cancel()
+			session.clear()
+			code = http.StatusAccepted
 		}
 		state := session.snapshot(active())
 		if err != nil {

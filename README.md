@@ -1,6 +1,6 @@
 # iOS OTA
 
-Documentation revision: `1.3.3`.
+Documentation revision: `1.4.0`.
 
 Mac background service: **Lyo Nodus iOS OTA** (`lyo-nodus-ios-ota`).
 The existing MacBook pairing remains **iOS OTA**. The independently paired
@@ -435,6 +435,14 @@ The prepared `1.2.0-capture-preview.8` candidate supports a screenshot-only endp
 
 ## System location
 
+Version `1.4.0` keeps the requested coordinate for the daemon lifetime until
+explicit Restore. App suspension, slow discovery and an inner-service failure
+do not discard it. Set/Restore return accepted state (HTTP 202); the daemon
+applies and maintains it, exposes applying/recovering/restoring, and reports
+active/idle only after a device reply. Each attempt uses a cancellable 60-second
+budget. OTA tunnel reconnection reapplies the current target. Restore cancels
+that target immediately, so recovery cannot bring it back.
+
 Version `1.3.2` adds `refresh-location --profile "$profile" --output
 "/absolute/private/connection.json"` for a changed host Tailnet IP or certificate
 renewal. It preserves the existing key, token and phone pairing. Stop the daemon,
@@ -459,4 +467,4 @@ and clear. The host retains the session when the phone app is suspended. A
 command reply is not proof of system readback or acceptance by another app.
 Profiles may retain their explicit existing paths so their one control socket
 remains available to local consumers; the installed binary and LaunchAgent are
-`ios-ota`.
+`lyo-nodus-ios-ota`.

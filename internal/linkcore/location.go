@@ -3,6 +3,8 @@ package linkcore
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"time"
@@ -10,9 +12,12 @@ import (
 	"github.com/danielpaulus/go-ios/ios/instruments"
 )
 
+const locationAttemptTimeout = 60 * time.Second
+const locationRefreshInterval = 5 * time.Second
+
 type locationDriver interface {
-	StartSimulateLocation(float64, float64) error
-	StopSimulateLocation() error
+	StartSimulateLocationContext(context.Context, float64, float64) error
+	StopSimulateLocationContext(context.Context) error
 	Close()
 }
 
@@ -25,11 +30,19 @@ type LocationState struct {
 	Error        string   `json:"error,omitempty"`
 }
 
+// HTTP owns only the latest intent. The single worker owns all developer I/O.
 type locationSession struct {
-	mu     sync.Mutex
-	driver locationDriver
-	state  LocationState
-	open   func(context.Context) (locationDriver, error)
+	mu              sync.Mutex
+	state           LocationState
+	revision, epoch uint64
+	cancel          context.CancelFunc
+	wake            chan struct{}
+	done            chan struct{}
+	open            func(context.Context) (locationDriver, error)
+}
+
+func newLocationSession(open func(context.Context) (locationDriver, error)) *locationSession {
+	return &locationSession{state: LocationState{Phase: "idle"}, open: open, wake: make(chan struct{}, 1), done: make(chan struct{})}
 }
 
 func validLocation(lat, lon float64) bool {
@@ -39,133 +52,180 @@ func validLocation(lat, lon float64) bool {
 func (s *Session) OpenLocation(ctx context.Context) (locationDriver, error) {
 	device, err := s.captureDevice(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Location service discovery failed: %w", err)
 	}
-	type opened struct {
-		driver locationDriver
-		err    error
+	driver, err := instruments.NewLocationSimulationServiceContext(ctx, device)
+	if err != nil {
+		return nil, fmt.Errorf("Location channel connection failed: %w", err)
 	}
-	result := make(chan opened)
-	go func() {
-		driver, err := instruments.NewLocationSimulationService(device)
-		select {
-		case result <- opened{driver, err}:
-		case <-ctx.Done():
-			if driver != nil {
-				driver.Close()
-			}
-		}
-	}()
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case result := <-result:
-		return result.driver, result.err
-	}
-}
-
-func locationCall(ctx context.Context, driver locationDriver, call func() error) error {
-	result := make(chan error, 1)
-	go func() { result <- call() }()
-	select {
-	case err := <-result:
-		return err
-	case <-ctx.Done():
-		driver.Close()
-		return ctx.Err()
-	}
+	return driver, nil
 }
 
 func (s *locationSession) snapshot(tunnelActive bool) LocationState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state := s.state
-	if state.Phase == "" {
-		state.Phase = "idle"
-	}
 	state.TunnelActive = tunnelActive
 	return state
 }
-func (s *locationSession) fail(message string) {
-	if s.driver != nil {
-		s.driver.Close()
-		s.driver = nil
+func (s *locationSession) signalLocked() {
+	if s.cancel != nil {
+		s.cancel()
 	}
-	s.state.Phase = "lost"
-	s.state.Error = message
-}
-func (s *locationSession) lost() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.driver != nil || s.state.Phase == "active" {
-		s.fail("Location connection lost. Reconnect the host to restore your location.")
+	select {
+	case s.wake <- struct{}{}:
+	default:
 	}
 }
-func (s *locationSession) set(ctx context.Context, lat, lon float64) error {
+func (s *locationSession) set(lat, lon float64) error {
 	if !validLocation(lat, lon) {
 		return errors.New("Invalid coordinates.")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.driver == nil {
-		driver, err := s.open(ctx)
-		if err != nil {
-			s.fail("Unable to open the iPhone location service.")
-			return errors.New(s.state.Error)
-		}
-		s.driver = driver
-	}
-	started := float64(time.Now().UnixMilli()) / 1000
-	s.state = LocationState{Phase: "applying", Latitude: &lat, Longitude: &lon, CommandTime: started}
-	driver := s.driver
-	err := locationCall(ctx, driver, func() error { return driver.StartSimulateLocation(lat, lon) })
-	if err != nil {
-		s.fail("Location change was not confirmed. Restore your real location.")
-		return errors.New(s.state.Error)
-	}
-	s.state = LocationState{Phase: "active", Latitude: &lat, Longitude: &lon, CommandTime: started}
+	s.revision++
+	s.state = LocationState{Phase: "applying", Latitude: &lat, Longitude: &lon}
+	s.signalLocked()
 	return nil
 }
-func (s *locationSession) clear(ctx context.Context) error {
+func (s *locationSession) clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.driver == nil {
-		driver, err := s.open(ctx)
-		if err != nil {
-			s.fail("Unable to connect to iPhone. The restore command was not sent.")
-			return errors.New(s.state.Error)
-		}
-		s.driver = driver
-	}
-	err := locationCall(ctx, s.driver, s.driver.StopSimulateLocation)
-	if err != nil {
-		s.fail("Location restore was not confirmed. Check the iPhone location.")
-		return errors.New(s.state.Error)
-	}
-	s.driver = nil
-	s.state = LocationState{Phase: "idle"}
-	return nil
+	s.revision++
+	// Removing the target happens before cancelling old I/O. No late Set can
+	// restore its authority, even if iOS processed it just before cancellation.
+	s.state = LocationState{Phase: "restoring"}
+	s.signalLocked()
 }
-func (s *locationSession) pulse(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+func (s *locationSession) lost() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.epoch++
+	s.revision++
+	if s.state.Phase != "idle" {
+		if s.state.Latitude != nil {
+			s.state.Phase = "recovering"
+		}
+		s.state.CommandTime = 0
+		s.state.Error = "Waiting for the iPhone connection."
+	}
+	s.signalLocked()
+}
+
+func closeLocation(driver *locationDriver) {
+	if *driver != nil {
+		(*driver).Close()
+		*driver = nil
+	}
+}
+
+func (s *locationSession) reconcile(owner context.Context, driver *locationDriver, epoch *uint64) {
+	s.mu.Lock()
+	if s.state.Phase == "idle" || owner.Err() != nil {
+		s.mu.Unlock()
+		return
+	}
+	request, revision, currentEpoch := s.state, s.revision, s.epoch
+	ctx, cancel := context.WithTimeout(owner, locationAttemptTimeout)
+	s.cancel = cancel
+	s.mu.Unlock()
+	defer cancel()
+	if *epoch != currentEpoch {
+		closeLocation(driver)
+		*epoch = currentEpoch
+	}
+	var err error
+	if *driver == nil {
+		*driver, err = s.open(ctx)
+	}
+	commandTime := float64(time.Now().UnixMilli()) / 1000
+	if err == nil {
+		if request.Latitude != nil {
+			err = (*driver).StartSimulateLocationContext(ctx, *request.Latitude, *request.Longitude)
+			if err != nil {
+				err = fmt.Errorf("Location set acknowledgement failed: %w", err)
+			}
+		} else {
+			err = (*driver).StopSimulateLocationContext(ctx)
+			if err != nil {
+				err = fmt.Errorf("Location restore acknowledgement failed: %w", err)
+			}
+		}
+	}
+	// Cancellation wins over a response that arrived concurrently.
+	if ctx.Err() != nil && err == nil {
+		err = ctx.Err()
+	}
+	s.mu.Lock()
+	s.cancel = nil
+	if revision != s.revision || owner.Err() != nil {
+		s.mu.Unlock()
+		closeLocation(driver)
+		return
+	}
+	if err != nil {
+		message := err.Error()
+		if s.state.Error != message {
+			slog.Warn(ServiceName+" location recovery pending", "error", message)
+		}
+		s.state.Error = message
+		s.state.CommandTime = 0
+		if request.Latitude != nil {
+			s.state.Phase = "recovering"
+		}
+		s.mu.Unlock()
+		closeLocation(driver)
+		return
+	}
+	s.state.Error = ""
+	if request.Latitude != nil {
+		s.state.Phase = "active"
+		if s.state.CommandTime == 0 {
+			s.state.CommandTime = commandTime
+		}
+	} else {
+		s.state = LocationState{Phase: "idle"}
+	}
+	s.mu.Unlock()
+	if request.Latitude == nil {
+		closeLocation(driver)
+	}
+}
+
+func (s *locationSession) run(ctx context.Context, ticks <-chan time.Time) {
+	var driver locationDriver
+	var epoch uint64
+	defer close(s.done)
+	defer func() {
+		// The outer session stays owned by the daemon until this worker has exited.
+		if s.snapshot(false).Phase != "idle" {
+			cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var err error
+			if driver == nil {
+				driver, err = s.open(cleanup)
+			}
+			if err == nil {
+				err = driver.StopSimulateLocationContext(cleanup)
+			}
+			if err != nil {
+				slog.Warn(ServiceName + " shutdown location clear was not acknowledged")
+			}
+		}
+		closeLocation(&driver)
+	}()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			s.mu.Lock()
-			if s.driver != nil && s.state.Phase == "active" {
-				callCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-				driver := s.driver
-				lat, lon := *s.state.Latitude, *s.state.Longitude
-				err := locationCall(callCtx, driver, func() error { return driver.StartSimulateLocation(lat, lon) })
-				cancel()
-				if err != nil {
-					s.fail("Location connection lost. Check the iPhone location.")
-				}
-			}
-			s.mu.Unlock()
+		case <-s.wake:
+		case <-ticks:
 		}
+		s.reconcile(ctx, &driver, &epoch)
 	}
+}
+func (s *locationSession) pulse(ctx context.Context) {
+	ticker := time.NewTicker(locationRefreshInterval)
+	defer ticker.Stop()
+	s.run(ctx, ticker.C)
 }

@@ -186,18 +186,30 @@ index 0000000..a623606
 +	c.once.Do(func() { err = c.Conn.Close() })
 +	return err
 +}
+diff --git a/ios/dtx_codec/channel.go b/ios/dtx_codec/channel.go
+index 9509086..08e8d76 100644
+--- a/ios/dtx_codec/channel.go
++++ b/ios/dtx_codec/channel.go
+@@ -181,0 +182,3 @@ func (d *Channel) sendAndAwaitReply(ctx context.Context, expectsReply bool, mess
++	case <-d.connection.Closed():
++		d.removeResponseWaiter(identifier)
++		return Message{}, d.connection.Err()
 diff --git a/ios/dtx_codec/channel_context_test.go b/ios/dtx_codec/channel_context_test.go
 new file mode 100644
-index 0000000..4e7d9f2
+index 0000000..e34f2c1
 --- /dev/null
 +++ b/ios/dtx_codec/channel_context_test.go
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,95 @@
 +package dtx
 +
 +import (
 +	"context"
 +	"errors"
++	"github.com/danielpaulus/go-ios/ios"
++	"github.com/danielpaulus/go-ios/ios/nskeyedarchiver"
++	"net"
 +	"testing"
++	"time"
 +)
 +
 +func TestDriverChannelWaitHonorsCancellation(t *testing.T) {
@@ -216,8 +228,75 @@ index 0000000..4e7d9f2
 +		t.Fatalf("connection close lost: %v", err)
 +	}
 +}
++
++func TestLocationChannelNegotiationUsesCallerDeadline(t *testing.T) {
++	client, server := net.Pipe()
++	defer server.Close()
++	conn, err := newDtxConnection(ios.NewDeviceConnectionWithRWC(client))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	conn.globalChannel.timeout = time.Millisecond
++	go func() {
++		request, err := ReadMessage(server)
++		if err != nil {
++			return
++		}
++		time.Sleep(30 * time.Millisecond)
++		payload, _ := nskeyedarchiver.ArchiveBin("ready")
++		reply, _ := Encode(request.Identifier, 1, 0, false, ResponseWithReturnValueInPayload, payload, NewPrimitiveDictionary())
++		server.Write(reply)
++	}()
++	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++	defer cancel()
++	channel, err := conn.RequestChannelIdentifierContext(ctx, "location", noopDispatcher{})
++	if err != nil || channel == nil {
++		t.Fatalf("caller deadline replaced by channel default: %v", err)
++	}
++	cancel()
++	select {
++	case <-conn.Closed():
++		t.Fatal("opening context retained lifetime ownership")
++	case <-time.After(10 * time.Millisecond):
++	}
++}
++func TestLocationChannelCancellationInterruptsBlockedWrite(t *testing.T) {
++	client, server := net.Pipe()
++	defer server.Close()
++	conn, err := newDtxConnection(ios.NewDeviceConnectionWithRWC(client))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
++	defer cancel()
++	_, err = conn.RequestChannelIdentifierContext(ctx, "location", noopDispatcher{})
++	if !errors.Is(err, context.DeadlineExceeded) {
++		t.Fatalf("cancellation lost: %v", err)
++	}
++	if _, ok := conn.activeChannels.Load(1); ok {
++		t.Fatal("unacknowledged channel registered as ready")
++	}
++}
++
++func TestLocationChannelPeerCloseDoesNotWaitForDeadline(t *testing.T) {
++	client, server := net.Pipe()
++	conn, err := newDtxConnection(ios.NewDeviceConnectionWithRWC(client))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer conn.Close()
++	go func() { ReadMessage(server); server.Close() }()
++	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++	defer cancel()
++	_, err = conn.RequestChannelIdentifierContext(ctx, "location", noopDispatcher{})
++	if err == nil || ctx.Err() != nil {
++		t.Fatalf("peer disconnect waited for caller deadline: %v", err)
++	}
++}
 diff --git a/ios/dtx_codec/connection.go b/ios/dtx_codec/connection.go
-index 5057d4e..f03c5d1 100644
+index 5057d4e..c42248a 100644
 --- a/ios/dtx_codec/connection.go
 +++ b/ios/dtx_codec/connection.go
 @@ -186 +186,5 @@ func NewTunnelConnection(device ios.DeviceEntry, serviceName string) (*Connectio
@@ -245,6 +324,60 @@ index 5057d4e..f03c5d1 100644
 @@ -266 +282 @@ func (dtxConn *Connection) ForChannelRequest(messageDispatcher Dispatcher) *Chan
 -	return channel
 +	return channel, nil
+@@ -281 +297,13 @@ func (dtxConn *Connection) AddDefaultChannelReceiver(messageDispatcher Dispatche
+-func (dtxConn *Connection) RequestChannelIdentifier(identifier string, messageDispatcher Dispatcher, opts ...ChannelOption) *Channel {
++func (dtxConn *Connection) RequestChannelIdentifier(identifier string, dispatcher Dispatcher, opts ...ChannelOption) *Channel {
++	ctx, cancel := context.WithTimeout(context.Background(), dtxConn.globalChannel.timeout)
++	defer cancel()
++	channel, err := dtxConn.RequestChannelIdentifierContext(ctx, identifier, dispatcher, opts...)
++	if err != nil {
++		golog.Error("failed requesting channel", "module", logModule, "channel_id", identifier, "error", err)
++	}
++	return channel
++}
++
++// RequestChannelIdentifierContext preserves the caller's deadline and reports
++// channel negotiation failure instead of treating an allocated channel as ready.
++func (dtxConn *Connection) RequestChannelIdentifierContext(ctx context.Context, identifier string, dispatcher Dispatcher, opts ...ChannelOption) (*Channel, error) {
+@@ -286,2 +314,5 @@ func (dtxConn *Connection) RequestChannelIdentifier(identifier string, messageDi
+-
+-	payload, _ := nskeyedarchiver.ArchiveBin(requestChannel)
++	channel := &Channel{channelCode: code, channelName: identifier, messageIdentifier: 1, connection: dtxConn, messageDispatcher: dispatcher, responseWaiters: map[int]chan Message{}, defragmenters: map[int]*FragmentDecoder{}, timeout: 5 * time.Second}
++	payload, err := nskeyedarchiver.ArchiveBin(requestChannel)
++	if err != nil {
++		return channel, err
++	}
+@@ -290,8 +321,7 @@ func (dtxConn *Connection) RequestChannelIdentifier(identifier string, messageDi
+-	arch, _ := nskeyedarchiver.ArchiveBin(identifier)
+-	auxiliary.AddBytes(arch)
+-	golog.Debug("Requesting channel", "module", logModule, "channel_id", identifier)
+-
+-	ctx, cancel := context.WithTimeout(context.Background(), dtxConn.globalChannel.timeout)
+-	defer cancel()
+-	rply, err := dtxConn.globalChannel.sendAndAwaitReply(ctx, true, Methodinvocation, payload, auxiliary)
+-	golog.Debug("channel request reply", "module", logModule, "channel_id", identifier, "reply", rply)
++	auxiliary.AddNsKeyedArchivedObject(identifier)
++	stop := context.AfterFunc(ctx, func() { dtxConn.Close() })
++	defer stop()
++	reply, err := dtxConn.globalChannel.sendAndAwaitReply(ctx, true, Methodinvocation, payload, auxiliary)
++	if ctx.Err() != nil {
++		return channel, ctx.Err()
++	}
+@@ -299 +329,4 @@ func (dtxConn *Connection) RequestChannelIdentifier(identifier string, messageDi
+-		golog.Error("failed requesting channel", "module", logModule, "channel_id", identifier, "error", err)
++		return channel, err
++	}
++	if reply.HasError() {
++		return channel, fmt.Errorf("channel %s was rejected", identifier)
+@@ -301,3 +333,0 @@ func (dtxConn *Connection) RequestChannelIdentifier(identifier string, messageDi
+-	golog.Debug("Channel open", "module", logModule, "channel_id", identifier)
+-	channel := &Channel{channelCode: code, channelName: identifier, messageIdentifier: 1, connection: dtxConn, messageDispatcher: messageDispatcher, responseWaiters: map[int]chan Message{}, defragmenters: map[int]*FragmentDecoder{}, timeout: 5 * time.Second}
+-	dtxConn.activeChannels.Store(code, channel)
+@@ -307,2 +337,2 @@ func (dtxConn *Connection) RequestChannelIdentifier(identifier string, messageDi
+-
+-	return channel
++	dtxConn.activeChannels.Store(code, channel)
++	return channel, nil
 diff --git a/ios/installationproxy/installationproxy.go b/ios/installationproxy/installationproxy.go
 index 8a70730..b683398 100644
 --- a/ios/installationproxy/installationproxy.go
@@ -269,6 +402,51 @@ index 8a70730..b683398 100644
 +	} else {
 +		deviceConn, err = ios.ConnectToService(device, serviceName)
 +	}
+diff --git a/ios/instruments/location_simulation.go b/ios/instruments/location_simulation.go
+index 70d2a6d..efdedea 100644
+--- a/ios/instruments/location_simulation.go
++++ b/ios/instruments/location_simulation.go
+@@ -3,0 +4,2 @@ import (
++	"context"
++	"fmt"
+@@ -50,0 +53,37 @@ func (d *LocationSimulationService) Close() {
++
++// NewLocationSimulationServiceContext opens the RSD-backed developer channel
++// with a caller-owned deadline. The connection outlives this opening context.
++func NewLocationSimulationServiceContext(ctx context.Context, device ios.DeviceEntry) (*LocationSimulationService, error) {
++	conn, err := dtx.NewTunnelConnectionContext(ctx, device, serviceNameRsd)
++	if err != nil {
++		return nil, err
++	}
++	channel, err := conn.RequestChannelIdentifierContext(ctx, locationSimulationIdentifier, loggingDispatcher{conn})
++	if err != nil {
++		conn.Close()
++		return nil, fmt.Errorf("LocationSimulation negotiation: %w", err)
++	}
++	return &LocationSimulationService{channel: channel, conn: conn}, nil
++}
++
++func (d *LocationSimulationService) StartSimulateLocationContext(ctx context.Context, lat, lon float64) error {
++	stop := context.AfterFunc(ctx, d.Close)
++	defer stop()
++	_, err := d.channel.MethodCallWithContext(ctx, "simulateLocationWithLatitude:longitude:", lat, lon)
++	if ctx.Err() != nil {
++		return ctx.Err()
++	}
++	return err
++}
++func (d *LocationSimulationService) StopSimulateLocationContext(ctx context.Context) error {
++	stop := context.AfterFunc(ctx, d.Close)
++	defer stop()
++	_, err := d.channel.MethodCallWithContext(ctx, "stopLocationSimulation")
++	if ctx.Err() != nil {
++		return ctx.Err()
++	}
++	if err == nil {
++		d.Close()
++	}
++	return err
++}
 diff --git a/ios/lockdown_value.go b/ios/lockdown_value.go
 index 6edb586..d2b0c2b 100755
 --- a/ios/lockdown_value.go

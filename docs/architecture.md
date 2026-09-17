@@ -1,6 +1,6 @@
 # iOS OTA Architecture
 
-Document revision: `1.3.3`
+Document revision: `1.4.0`
 
 Revised: `2026-09-17`
 
@@ -28,13 +28,30 @@ The Mac mini has its own identity with the owner-selected phone pairing name
 **iOS OTA Mac Mini**. These are per-host pairing labels, not alternate service
 names or executable aliases.
 
-The daemon owns one LocationSimulation connection using Link Core's existing
-Instruments API. It uses the same paired tunnel, with fresh RSD identity checks.
-Set/update/clear have bounded deadlines. An unacknowledged set retains its
-requested target as uncertain so shutdown still attempts clear. Request cancellation and phone app
-background suspension do not end an accepted simulation. A five-second refresh
-checks the session. Failure is visible; reconnect never silently reapplies an
-old target. Service shutdown attempts clear before closing the outer tunnel.
+The daemon owns one requested location and one LocationSimulation connection over
+its existing paired tunnel. PUT and DELETE return HTTP 202 with the accepted
+state immediately; GET remains responsive during service discovery. A single
+worker applies the latest request, refreshes an active coordinate every five
+seconds and reopens a failed inner service while retaining the requested target.
+Tunnel loss marks the target recovering; a replacement authenticated OTA tunnel
+reapplies it. The target lasts until explicit Restore or daemon shutdown, not
+until the phone HTTP request, foreground session or one refresh ends. Nothing is
+persisted across daemon restarts.
+
+Each worker attempt has one 60-second context covering fresh RSD identity,
+Instruments channel negotiation and the command acknowledgement. Link Core
+propagates that context through channel creation and method calls, including
+connection cancellation; its old implicit five-second channel deadline is not
+used for this operation. A failed attempt reports recovering with its failed
+stage, never active. A current successful command is required for active/idle;
+fresh phone CoreLocation is still required for system verification.
+
+Restore immediately removes the requested target, cancels an obsolete in-flight
+set and makes the worker send stop until acknowledged. Revision checks prevent
+late replies from resurrecting an older target. Update supersedes the old
+coordinate the same way. Only the worker owns and closes the inner connection;
+HTTP/state locks never cover network I/O. Shutdown cancels the worker, which makes a bounded best-effort clear. The daemon
+joins it before closing the outer tunnel.
 
 The location listener uses TLS 1.3 and only a local Tailnet IPv4 address. A protected
 credential file supplies a certificate and a random device-scoped bearer token.
@@ -326,3 +343,20 @@ No phone-side VPN configuration is created by location.
 ### Location renewal acceptance (2026-09-17)
 
 `go test -race ./internal/linkcore ./cmd/lyo-nodus-ios-ota` passed. The service was upgraded to 1.3.2 and its existing certificate refreshed for 100.87.87.50:61443, preserving the key, token and device profile. Normal certificate/hostname verification and authenticated GET returned HTTP 200 with phase idle. The owner-only connection document was staged into the installed phone app Documents/lyo-proxy-location.json through its paired CoreDevice channel. Phone import and a fresh system-location mutation were not exercised.
+
+### Persistent Location 1.4.0 verification (2026-09-17)
+
+The previous read-only service probe required 11.874 seconds before any location
+command, exceeding the old ten-second HTTP mutation budget. The fixed design
+accepts intent immediately and gives the host worker one deadline through RSD,
+channel negotiation and command reply. The complete scripts/test.sh passed
+(upstream affected packages, service tests, race tests and vet). Additional DTX
+race tests passed for caller-owned deadlines, blocked-write cancellation and
+peer disconnect. Service tests cover refresh recovery, replacement tunnels,
+Restore racing with a late Set, superseding slow discovery, pending failed
+Restore and HTTP cancellation while discovery is blocked.
+
+The inspected 1.4.0 binary was activated on MacBook using the existing profile,
+LaunchAgent, certificate, token and pairing. The new daemon acquired generation
+1. Live Restore and target-persistence acceptance are in progress; source tests
+and service readiness do not establish physical CoreLocation acceptance.
