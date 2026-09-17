@@ -1,6 +1,6 @@
 # iOS OTA
 
-Documentation revision: `1.4.1`.
+Documentation revision: `1.4.2`.
 
 Mac background service: **Lyo Nodus iOS OTA** (`lyo-nodus-ios-ota`).
 The existing MacBook pairing remains **iOS OTA**. The independently paired

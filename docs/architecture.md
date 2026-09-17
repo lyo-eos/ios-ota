@@ -1,6 +1,6 @@
 # iOS OTA Architecture
 
-Document revision: `1.4.1`
+Document revision: `1.4.2`
 
 Revised: `2026-09-17`
 
@@ -376,5 +376,10 @@ The Instruments and DTX location cases also passed under the race detector.
 The existing MacBook LaunchAgent now runs the inspected 1.4.1 binary. Activation
 waited for the old job to finish removal before bootstrap; the profile, pairing
 and TLS authority were preserved. The current target was captured immediately
-before activation and submitted to the new daemon. Physical retention is being
-observed separately.
+before activation and submitted to the new daemon. 41 consecutive active status samples spanned 86.89 seconds with the same command
+timestamp and no error; the owner subsequently confirmed tested system readback.
+The phone's installed 0.16.0 (35) identity was independently read through
+InstallationProxy. Optional native background/relaunch testing was not accepted:
+iOS cancelled LocalAuthentication before the test executed, and that run was
+cancelled after the owner confirmed their manual test. The current target remains
+active. Detailed receipts are under the Lyo Proxy checkout .build/location/.
