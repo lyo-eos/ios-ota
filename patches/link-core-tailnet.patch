@@ -1536,53 +1536,356 @@ index 37248c5..234a51e 100644
 +
 @@ -270,0 +276 @@ func connectToUserspaceTunnelLockdown(ctx context.Context, device ios.DeviceEntr
 +		done:    iface.Done(),
+diff --git a/ios/zipconduit/deflate_test.go b/ios/zipconduit/deflate_test.go
+new file mode 100644
+index 0000000..eb9e21d
+--- /dev/null
++++ b/ios/zipconduit/deflate_test.go
+@@ -0,0 +1,163 @@
++package zipconduit
++
++import (
++	"bytes"
++	"compress/flate"
++	"encoding/binary"
++	"hash/crc32"
++	"io"
++	"math/rand"
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++
++	"github.com/danielpaulus/go-ios/ios"
++)
++
++type recordingConn struct {
++	sent      bytes.Buffer
++	responses io.Reader
++}
++
++func (c *recordingConn) Read(p []byte) (int, error)  { return c.responses.Read(p) }
++func (c *recordingConn) Write(p []byte) (int, error) { return c.sent.Write(p) }
++func (c *recordingConn) Close() error                { return nil }
++
++type streamEntry struct {
++	name           string
++	flags          uint16
++	method         uint16
++	crc            uint32
++	compressedSize uint32
++	size           uint32
++	data           []byte
++}
++
++// parseStream splits what was sent to the device into its zip entries.
++func parseStream(t *testing.T, stream []byte) []streamEntry {
++	t.Helper()
++	if len(stream) < 4 {
++		t.Fatalf("stream too short: %d bytes", len(stream))
++	}
++	initLength := binary.BigEndian.Uint32(stream)
++	stream = stream[4+initLength:]
++	var entries []streamEntry
++	for {
++		if bytes.Equal(stream, centralDirectoryHeader) {
++			return entries
++		}
++		if len(stream) < 30 || binary.LittleEndian.Uint32(stream) != 0x04034b50 {
++			t.Fatalf("expected a local file header after %d entries", len(entries))
++		}
++		entry := streamEntry{
++			flags:          binary.LittleEndian.Uint16(stream[6:]),
++			method:         binary.LittleEndian.Uint16(stream[8:]),
++			crc:            binary.LittleEndian.Uint32(stream[14:]),
++			compressedSize: binary.LittleEndian.Uint32(stream[18:]),
++			size:           binary.LittleEndian.Uint32(stream[22:]),
++		}
++		nameLength := int(binary.LittleEndian.Uint16(stream[26:]))
++		extraLength := int(binary.LittleEndian.Uint16(stream[28:]))
++		stream = stream[30:]
++		if len(stream) < nameLength+extraLength+int(entry.compressedSize) {
++			t.Fatalf("entry %d is truncated", len(entries))
++		}
++		entry.name = string(stream[:nameLength])
++		stream = stream[nameLength+extraLength:]
++		entry.data = stream[:entry.compressedSize]
++		stream = stream[entry.compressedSize:]
++		entries = append(entries, entry)
++	}
++}
++
++func TestSendDirectoryDeflatesFilesThatShrink(t *testing.T) {
++	app := filepath.Join(t.TempDir(), "Test.app")
++	random := make([]byte, 256*1024)
++	rand.New(rand.NewSource(1)).Read(random)
++	files := map[string][]byte{
++		// Larger compressible file first, so the spool is reused for a smaller one.
++		"Frameworks/Engine.framework/Engine": bytes.Repeat([]byte("debug symbols and code "), 64*1024),
++		"Info.plist":                         []byte(strings.Repeat("<key>CFBundleIdentifier</key>\n", 40)),
++		"Assets.car":                         random,
++		"Empty":                              {},
++	}
++	for name, content := range files {
++		path := filepath.Join(app, name)
++		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
++			t.Fatal(err)
++		}
++		if err := os.WriteFile(path, content, 0o644); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	var responses bytes.Buffer
++	if err := ios.NewPlistCodecReadWriter(nil, &responses).Write(map[string]interface{}{"Status": "DataComplete"}); err != nil {
++		t.Fatal(err)
++	}
++	device := &recordingConn{responses: &responses}
++	conn := Connection{deviceConn: device, plistCodec: ios.NewPlistCodecReadWriter(device, device)}
++	if err := conn.SendFile(app); err != nil {
++		t.Fatalf("SendFile: %v", err)
++	}
++
++	wantMethods := map[string]uint16{
++		"Frameworks/Engine.framework/Engine": 8,
++		"Info.plist":                         8,
++		"Assets.car":                         0,
++		"Empty":                              0,
++		"META-INF/" + metainfFileName:        0,
++	}
++	seen := map[string]bool{}
++	for _, entry := range parseStream(t, device.sent.Bytes()) {
++		if entry.flags != 0 {
++			t.Errorf("%s: general purpose flags %#x, want 0 (no data descriptor)", entry.name, entry.flags)
++		}
++		if strings.HasSuffix(entry.name, "/") {
++			if entry.method != 0 || entry.size != 0 || len(entry.data) != 0 {
++				t.Errorf("%s: directory entry has method %d and %d bytes", entry.name, entry.method, entry.size)
++			}
++			continue
++		}
++		var content []byte
++		switch entry.method {
++		case 0:
++			if entry.compressedSize != entry.size {
++				t.Errorf("%s: stored with compressed size %d != size %d", entry.name, entry.compressedSize, entry.size)
++			}
++			content = entry.data
++		case 8:
++			if entry.compressedSize >= entry.size {
++				t.Errorf("%s: deflated to %d bytes, not smaller than %d", entry.name, entry.compressedSize, entry.size)
++			}
++			inflated, err := io.ReadAll(flate.NewReader(bytes.NewReader(entry.data)))
++			if err != nil {
++				t.Fatalf("%s: inflate: %v", entry.name, err)
++			}
++			content = inflated
++		default:
++			t.Fatalf("%s: unexpected compression method %d", entry.name, entry.method)
++		}
++		if uint32(len(content)) != entry.size {
++			t.Errorf("%s: header size %d, content %d bytes", entry.name, entry.size, len(content))
++		}
++		if crc32.ChecksumIEEE(content) != entry.crc {
++			t.Errorf("%s: CRC mismatch", entry.name)
++		}
++		if want, ok := wantMethods[entry.name]; ok {
++			seen[entry.name] = true
++			if entry.method != want {
++				t.Errorf("%s: compression method %d, want %d", entry.name, entry.method, want)
++			}
++		}
++		if want, ok := files[entry.name]; ok && !bytes.Equal(content, want) {
++			t.Errorf("%s: content differs from the source file", entry.name)
++		}
++	}
++	for name := range wantMethods {
++		if !seen[name] {
++			t.Errorf("%s was not sent", name)
++		}
++	}
++}
 diff --git a/ios/zipconduit/zip_utils.go b/ios/zipconduit/zip_utils.go
-index c8c99ad..a0a7382 100644
+index c8c99ad..9cd30a1 100644
 --- a/ios/zipconduit/zip_utils.go
 +++ b/ios/zipconduit/zip_utils.go
 @@ -8 +8 @@ import (
 -const logModule = "go-ios/zipconduit"
 +const logModule = "Link Core/ZipConduit"
+@@ -50,0 +51,10 @@ func newZipHeader(size uint32, crc32 uint32, name string) (zipHeader, []byte, []
++// newDeflatedZipHeader is newZipHeader for a file whose data is DEFLATE
++// compressed. Sizes and CRC stay in the local header because the stream has
++// no data descriptors.
++func newDeflatedZipHeader(compressedSize uint32, size uint32, crc32 uint32, name string) (zipHeader, []byte, []byte) {
++	header, nameBytes, extra := newZipHeader(size, crc32, name)
++	header.compressionMethod = 8 // DEFLATE
++	header.compressedSize = compressedSize
++	return header, nameBytes, extra
++}
++
 diff --git a/ios/zipconduit/zipconduit_installer.go b/ios/zipconduit/zipconduit_installer.go
-index 754b47f..64d1d64 100644
+index 754b47f..31f9e0b 100644
 --- a/ios/zipconduit/zipconduit_installer.go
 +++ b/ios/zipconduit/zipconduit_installer.go
-@@ -61,0 +62,2 @@ type Connection struct {
+@@ -4,0 +5 @@ import (
++	"bufio"
+@@ -5,0 +7 @@ import (
++	"compress/flate"
+@@ -36,0 +39,3 @@ This is why I had to hack my own "zip" encoding together. Here is how zip_condui
++    Files of an app directory are sent DEFLATE compressed instead when that makes them smaller;
++    Xcode's own client (MobileDevice SZConduit) supports the same through its CompressionLevel option.
++    Either way CRC and sizes go in the local header, so
+@@ -61,0 +67,2 @@ type Connection struct {
 +type ProgressHandler func(percent int, status string)
 +
-@@ -100,0 +103,6 @@ func (conn Connection) SendFile(appFilePath string) error {
+@@ -100,0 +108,6 @@ func (conn Connection) SendFile(appFilePath string) error {
 +	return conn.SendFileWithProgress(appFilePath, nil)
 +}
 +
 +// SendFileWithProgress installs an app and reports each device installation
 +// progress update to handler. A nil handler preserves SendFile behavior.
 +func (conn Connection) SendFileWithProgress(appFilePath string, handler ProgressHandler) error {
-@@ -113 +121 @@ func (conn Connection) SendFile(appFilePath string) error {
+@@ -113 +126 @@ func (conn Connection) SendFile(appFilePath string) error {
 -		return conn.sendDirectory(appFilePath)
 +		return conn.sendDirectory(appFilePath, handler)
-@@ -115 +123 @@ func (conn Connection) SendFile(appFilePath string) error {
+@@ -115 +128 @@ func (conn Connection) SendFile(appFilePath string) error {
 -	return conn.sendIpaFile(appFilePath)
 +	return conn.sendIpaFile(appFilePath, handler)
-@@ -122 +130 @@ func (conn Connection) Close() error {
+@@ -122 +135 @@ func (conn Connection) Close() error {
 -func (conn Connection) sendDirectory(dir string) error {
 +func (conn Connection) sendDirectory(dir string, handler ProgressHandler) error {
-@@ -188 +196 @@ func (conn Connection) sendDirectory(dir string) error {
+@@ -152,0 +166,5 @@ func (conn Connection) sendDirectory(dir string) error {
++	spool, err := newDeflateSpool(tmpDir)
++	if err != nil {
++		return err
++	}
++	defer spool.Close()
+@@ -164 +182 @@ func (conn Connection) sendDirectory(dir string) error {
+-	err = addFileToZip(conn.deviceConn, metainfFolder, tmpDir, hasher)
++	err = addFileToZip(conn.deviceConn, metainfFolder, tmpDir, hasher, nil)
+@@ -168 +186 @@ func (conn Connection) sendDirectory(dir string) error {
+-	err = addFileToZip(conn.deviceConn, metainfFile, tmpDir, hasher)
++	err = addFileToZip(conn.deviceConn, metainfFile, tmpDir, hasher, nil)
+@@ -177 +195 @@ func (conn Connection) sendDirectory(dir string) error {
+-		err := addFileToZip(conn.deviceConn, file, dir, hasher)
++		err := addFileToZip(conn.deviceConn, file, dir, hasher, spool)
+@@ -188 +206 @@ func (conn Connection) sendDirectory(dir string) error {
 -	return conn.waitForInstallation()
 +	return conn.waitForInstallation(handler)
-@@ -191 +199 @@ func (conn Connection) sendDirectory(dir string) error {
+@@ -191 +209 @@ func (conn Connection) sendDirectory(dir string) error {
 -func (conn Connection) sendIpaFile(ipaFile string) error {
 +func (conn Connection) sendIpaFile(ipaFile string, handler ProgressHandler) error {
-@@ -252 +260 @@ func (conn Connection) sendIpaFile(ipaFile string) error {
+@@ -252 +270 @@ func (conn Connection) sendIpaFile(ipaFile string) error {
 -	return conn.waitForInstallation()
 +	return conn.waitForInstallation(handler)
-@@ -255 +263 @@ func (conn Connection) sendIpaFile(ipaFile string) error {
+@@ -255 +273 @@ func (conn Connection) sendIpaFile(ipaFile string) error {
 -func (conn Connection) waitForInstallation() error {
 +func (conn Connection) waitForInstallation(handler ProgressHandler) error {
-@@ -267,0 +276,3 @@ func (conn Connection) waitForInstallation() error {
+@@ -267,0 +286,3 @@ func (conn Connection) waitForInstallation() error {
 +			if handler != nil {
 +				handler(100, status)
 +			}
-@@ -270,0 +282,3 @@ func (conn Connection) waitForInstallation() error {
+@@ -270,0 +292,3 @@ func (conn Connection) waitForInstallation() error {
 +		if handler != nil {
 +			handler(percent, status)
 +		}
+@@ -300 +324,2 @@ func createMetaInfFile(numFiles int, totalBytes uint64) []byte {
+-func addFileToZip(writer io.Writer, filename string, tmpdir string, hasher hash.Hash32) error {
++// addFileToZip sends one entry. A nil spool sends file data with STORE.
++func addFileToZip(writer io.Writer, filename string, tmpdir string, hasher hash.Hash32, spool *deflateSpool) error {
+@@ -345 +370,2 @@ func addFileToZip(writer io.Writer, filename string, tmpdir string, hasher hash.
+-	crc, err := calculateCrc32(fileToZip, hasher)
++	// write our "zip" file header
++	header, name, extra, data, err := fileZipEntry(fileToZip, info.Size(), filenameForZip, hasher, spool)
+@@ -349,3 +374,0 @@ func addFileToZip(writer io.Writer, filename string, tmpdir string, hasher hash.
+-	fileToZip.Seek(0, io.SeekStart)
+-	// write our "zip" file header
+-	header, name, extra := newZipHeader(uint32(info.Size()), crc, filenameForZip)
+@@ -364 +387 @@ func addFileToZip(writer io.Writer, filename string, tmpdir string, hasher hash.
+-	_, err = io.Copy(writer, fileToZip)
++	_, err = io.Copy(writer, data)
+@@ -367,0 +391,84 @@ func addFileToZip(writer io.Writer, filename string, tmpdir string, hasher hash.
++// fileZipEntry returns the header of a file entry and the data to send after
++// it: the deflated file when that is smaller, otherwise the file itself.
++func fileZipEntry(file *os.File, size int64, name string, hasher hash.Hash32, spool *deflateSpool) (zipHeader, []byte, []byte, io.Reader, error) {
++	if spool == nil {
++		crc, err := calculateCrc32(file, hasher)
++		if err != nil {
++			return zipHeader{}, nil, nil, nil, err
++		}
++		_, err = file.Seek(0, io.SeekStart)
++		header, nameBytes, extra := newZipHeader(uint32(size), crc, name)
++		return header, nameBytes, extra, file, err
++	}
++	crc, compressed, compressedSize, err := spool.deflate(file, hasher)
++	if err != nil {
++		return zipHeader{}, nil, nil, nil, err
++	}
++	if compressedSize < size {
++		header, nameBytes, extra := newDeflatedZipHeader(uint32(compressedSize), uint32(size), crc, name)
++		return header, nameBytes, extra, compressed, nil
++	}
++	// Already compressed data such as images and audio does not shrink.
++	_, err = file.Seek(0, io.SeekStart)
++	header, nameBytes, extra := newZipHeader(uint32(size), crc, name)
++	return header, nameBytes, extra, file, err
++}
++
++// deflateSpool compresses file entries before they are sent. The local header
++// must carry the compressed size, so each file is deflated into a temporary
++// file first and sent from there; memory use stays flat for large binaries.
++type deflateSpool struct {
++	file     *os.File
++	buffered *bufio.Writer
++	writer   *flate.Writer
++}
++
++func newDeflateSpool(dir string) (*deflateSpool, error) {
++	file, err := os.CreateTemp(dir, "deflate-spool")
++	if err != nil {
++		return nil, err
++	}
++	buffered := bufio.NewWriterSize(file, 1<<20)
++	// BestSpeed compresses app binaries at ~200 MB/s, far faster than the link
++	// they are sent over; higher levels save only a few percent more.
++	writer, err := flate.NewWriter(buffered, flate.BestSpeed)
++	if err != nil {
++		file.Close()
++		return nil, err
++	}
++	return &deflateSpool{file: file, buffered: buffered, writer: writer}, nil
++}
++
++func (s *deflateSpool) Close() error {
++	return s.file.Close()
++}
++
++// deflate compresses src into the spool and returns the CRC-32 of src, a
++// reader over the compressed data and its size. The spool is overwritten from
++// the start each time; the reader stops before stale data of earlier files.
++func (s *deflateSpool) deflate(src io.Reader, hasher hash.Hash32) (uint32, io.Reader, int64, error) {
++	if _, err := s.file.Seek(0, io.SeekStart); err != nil {
++		return 0, nil, 0, err
++	}
++	s.buffered.Reset(s.file)
++	s.writer.Reset(s.buffered)
++	hasher.Reset()
++	if _, err := io.Copy(io.MultiWriter(hasher, s.writer), src); err != nil {
++		return 0, nil, 0, err
++	}
++	if err := s.writer.Close(); err != nil {
++		return 0, nil, 0, err
++	}
++	if err := s.buffered.Flush(); err != nil {
++		return 0, nil, 0, err
++	}
++	compressedSize, err := s.file.Seek(0, io.SeekCurrent)
++	if err != nil {
++		return 0, nil, 0, err
++	}
++	if _, err := s.file.Seek(0, io.SeekStart); err != nil {
++		return 0, nil, 0, err
++	}
++	return hasher.Sum32(), io.LimitReader(s.file, compressedSize), compressedSize, nil
++}
++
