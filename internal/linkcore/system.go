@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-const ModuleVersion = "1.3.1"
+const ModuleVersion = "1.4.0"
 const PinnedLinkCoreCommit = "3ebc297691a9e364772aef027744ebc0c49421a5"
 
 type DoctorReport struct {
@@ -24,8 +24,9 @@ type DoctorReport struct {
 	PatchSHA256          string `json:"patch_sha256"`
 	ProfileValid         bool   `json:"profile_valid"`
 	PairRecordValid      bool   `json:"pair_record_valid"`
-	TailnetPeerPresent   bool   `json:"tailnet_peer_present"`
-	TailnetReachable     bool   `json:"tailnet_reachable"`
+	Overlay              string `json:"overlay"`
+	OverlayPeerPresent   bool   `json:"overlay_peer_present"`
+	OverlayReachable     bool   `json:"overlay_reachable"`
 	RemoteListenerOpen   bool   `json:"remote_listener_open"`
 	RemoteListenerStatus string `json:"remote_listener_status"`
 }
@@ -97,9 +98,36 @@ func tailnetPingArguments(target string) []string {
 	return []string{"ping", "--c", "1", "--timeout", "5s", "--until-direct=false", target}
 }
 
+// validateWireGuard has no unprivileged peer list on macOS (wg show needs
+// root, and the tunnel may terminate on another LAN host), so one answered
+// ICMP echo stands for both peer presence and reachability.
+func validateWireGuard(ctx context.Context, target string) (bool, bool, error) {
+	command, arguments := wireGuardPingCommand(target)
+	if err := exec.CommandContext(ctx, command, arguments...).Run(); err != nil {
+		return false, false, coded("wireguard_unreachable", "the configured iPhone did not answer ping over WireGuard", err)
+	}
+	return true, true, nil
+}
+
+// wireGuardPingCommand allows a few probes because an idle iPhone on Wi-Fi
+// often drops the first echo while waking its radio.
+func wireGuardPingCommand(target string) (string, []string) {
+	if address, err := netip.ParseAddr(target); err == nil && address.Is6() {
+		return "/sbin/ping6", []string{"-c", "3", target}
+	}
+	return "/sbin/ping", []string{"-c", "3", "-o", "-t", "6", target}
+}
+
+func validateOverlay(ctx context.Context, config Config) (bool, bool, error) {
+	if config.Overlay == OverlayWireGuard {
+		return validateWireGuard(ctx, config.TargetIP)
+	}
+	return validateTailnet(ctx, config.TargetIP)
+}
+
 func listenerOpen(ctx context.Context, config Config) bool {
 	dialer := net.Dialer{Timeout: config.ConnectTimeout()}
-	connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(config.TargetTailnetIP, itoa(config.RemotePairingPort)))
+	connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(config.TargetIP, itoa(config.RemotePairingPort)))
 	if err != nil {
 		return false
 	}
@@ -151,9 +179,10 @@ func Doctor(ctx context.Context, profilePath string, metadata BuildMetadata) (Do
 		return report, err
 	}
 	report.PairRecordValid = true
-	present, reachable, err := validateTailnet(ctx, config.TargetTailnetIP)
-	report.TailnetPeerPresent = present
-	report.TailnetReachable = reachable
+	report.Overlay = config.Overlay
+	present, reachable, err := validateOverlay(ctx, config)
+	report.OverlayPeerPresent = present
+	report.OverlayReachable = reachable
 	if err != nil {
 		return report, err
 	}
@@ -166,7 +195,18 @@ func Doctor(ctx context.Context, profilePath string, metadata BuildMetadata) (Do
 	return report, nil
 }
 
-func IsTailnetAddress(value string) bool {
-	address, err := netip.ParseAddr(strings.TrimSpace(value))
-	return err == nil && (tailscaleIPv4.Contains(address) || tailscaleIPv6.Contains(address))
+// IsOverlayAddress reports whether value is an address the overlay can carry:
+// Tailscale's ranges, or any private (RFC 1918 / ULA) address for WireGuard.
+func IsOverlayAddress(overlay string, value string) bool {
+	address, err := netip.ParseAddr(value)
+	if err != nil {
+		return false
+	}
+	switch overlay {
+	case OverlayTailscale:
+		return tailscaleIPv4.Contains(address) || tailscaleIPv6.Contains(address)
+	case OverlayWireGuard:
+		return address.IsPrivate()
+	}
+	return false
 }

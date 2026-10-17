@@ -190,12 +190,12 @@ func writeOneResponse(writer io.Writer, response Response) error {
 	return json.NewEncoder(writer).Encode(response)
 }
 
-func validateCommand(request Request) error {
+func validateCommand(request Request, overlay string) error {
 	if request.Command == "run-tests" {
 		if request.AppPath != "" || request.BundleIdentifier != "" {
 			return coded("control_request_invalid", "run-tests accepts only test_run", nil)
 		}
-		return validateTestRun(request.TestRun)
+		return validateTestRun(request.TestRun, overlay)
 	}
 	if request.TestRun != nil {
 		return coded("control_request_invalid", "test_run is only valid for run-tests", nil)

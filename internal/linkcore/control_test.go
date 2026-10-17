@@ -10,7 +10,7 @@ func TestValidateCommand(t *testing.T) {
 		{Command: "uninstall", BundleIdentifier: "lyo.nodus"},
 	}
 	for _, request := range accepted {
-		if err := validateCommand(request); err != nil {
+		if err := validateCommand(request, OverlayTailscale); err != nil {
 			t.Fatalf("request %#v: %v", request, err)
 		}
 	}
@@ -26,7 +26,7 @@ func TestValidateCommand(t *testing.T) {
 		{Command: "status", BundleIdentifier: "lyo.nodus"},
 	}
 	for _, request := range rejected {
-		if err := validateCommand(request); errorCode(err) != "control_request_invalid" {
+		if err := validateCommand(request, OverlayTailscale); errorCode(err) != "control_request_invalid" {
 			t.Fatalf("request %#v error = %v", request, err)
 		}
 	}

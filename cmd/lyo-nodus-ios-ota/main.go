@@ -36,7 +36,8 @@ func configure(arguments []string) error {
 	profile := flags.String("profile", "", "absolute profile path")
 	deviceLabel := flags.String("device-label", "", "display-only device label")
 	remoteIdentifier := flags.String("remote-identifier", "", "RemotePairing device identifier")
-	target := flags.String("target-tailnet-ip", "", "iPhone Tailnet IP")
+	overlay := flags.String("overlay", linkcore.OverlayTailscale, "network that reaches the iPhone: tailscale or wireguard")
+	target := flags.String("target-ip", "", "iPhone address on the overlay: its Tailscale IP or WireGuard tunnel IP")
 	pairRecord := flags.String("pair-record", "", "absolute owner-only RemotePairing plist")
 	remotePort := flags.Int("remote-pairing-port", 49152, "RemotePairing TCP port")
 	localPort := flags.Int("local-forward-port", 61015, "local userspace forwarder port")
@@ -50,7 +51,7 @@ func configure(arguments []string) error {
 		{*profile, "--profile"},
 		{*deviceLabel, "--device-label"},
 		{*remoteIdentifier, "--remote-identifier"},
-		{*target, "--target-tailnet-ip"},
+		{*target, "--target-ip"},
 		{*pairRecord, "--pair-record"},
 	}
 	for _, item := range requiredFlags {
@@ -61,7 +62,8 @@ func configure(arguments []string) error {
 	config := linkcore.DefaultConfig()
 	config.DeviceLabel = *deviceLabel
 	config.RemoteIdentifier = *remoteIdentifier
-	config.TargetTailnetIP = *target
+	config.Overlay = *overlay
+	config.TargetIP = *target
 	config.PairRecordPath = *pairRecord
 	config.RemotePairingPort = *remotePort
 	config.LocalForwardPort = *localPort
@@ -212,7 +214,7 @@ func run(arguments []string) error {
 	case "configure-location":
 		flags := flag.NewFlagSet("configure-location", flag.ContinueOnError)
 		profile := flags.String("profile", "", "absolute profile path")
-		listen := flags.String("listen", "", "local Tailnet IP and port")
+		listen := flags.String("listen", "", "local overlay IPv4 address and port")
 		output := flags.String("output", "", "new private connection document")
 		if err := flags.Parse(arguments[1:]); err != nil {
 			return err

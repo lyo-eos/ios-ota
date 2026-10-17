@@ -1,20 +1,21 @@
 # iOS OTA Architecture
 
-Document revision: `1.3.1-design.2`
+Document revision: `1.4.0-design.1`
 
-Revised: `2026-09-12`
+Revised: `2026-10-17`
 
 ## Decision
 
 iOS OTA is one unprivileged, launchd-managed Go daemon on macOS. It owns one
 verified RemotePairing control connection, one TLS-PSK data connection, one
 userspace RSD topology, and serialized app lifecycle requests for one
-configured iPhone. Tailscale supplies stable unicast reachability but is not
+configured iPhone. The profile's overlay (Tailscale or WireGuard) supplies
+stable unicast reachability but is not
 pairing, session, installation, or removal authority.
 
 The CLI is a short-lived client. It communicates only through a profile-scoped,
 owner-only Unix socket. An explicitly configured location-only HTTPS endpoint
-accepts a device-scoped credential on the host Tailnet address. It cannot
+accepts a device-scoped credential on the host overlay address. It cannot
 install/remove apps, read files, or invoke arbitrary developer services.
 
 ## iOS OTA location extension and naming
@@ -34,7 +35,7 @@ background suspension do not end an accepted simulation. A five-second refresh
 checks the session. Failure is visible; reconnect never silently reapplies an
 old target. Service shutdown attempts clear before closing the outer tunnel.
 
-The location listener uses TLS 1.3 and only a local Tailnet IPv4 address. A protected
+The location listener uses TLS 1.3 and only a local overlay IPv4 address. A protected
 credential file supplies a certificate and a random device-scoped bearer token.
 `configure-location` exports URL, certificate SHA-256 and token for App import.
 Only GET/PUT/DELETE `/v1/location` are accepted. Credentials and coordinates are
@@ -100,7 +101,7 @@ readback and capture acceptance remain separate observations.
 | --- | --- |
 | Source compilation | Xcode / `xcodebuild` |
 | Development signing | Xcode and Apple's signing assets |
-| Bridge reachability | Tailscale plus the configured iPhone Tailnet IP |
+| Bridge reachability | The profile overlay (Tailscale or WireGuard) plus the configured iPhone IP |
 | Pair verification | The configured owner-only RemotePairing record |
 | Warm session | The long-running iOS OTA daemon |
 | App transfer | Streaming zip conduit over the live RSD session |
@@ -268,3 +269,26 @@ The host accepts only pinned TLS 1.3 requests from the authenticated client.
 The phone needs a narrowly scoped ATS exception for Tailnet IPv4 because iOS
 17+ otherwise disallows relaxing IP-certificate trust to this private anchor.
 No phone-side VPN configuration is created by location.
+
+## iOS OTA 1.4.0 overlay selection, 2026-10-17
+
+Profile schema 5 replaces `target_tailnet_ip` with `overlay` and `target_ip`.
+`tailscale` keeps the previous rules: the target is a Tailscale address and
+`doctor` uses `tailscale status` and `tailscale ping`. `wireguard` accepts a
+private (RFC 1918 or ULA) target, and `doctor` uses ICMP, because macOS has no
+unprivileged WireGuard peer listing and the tunnel may terminate on another
+LAN host. Schema-4 profiles load unchanged as `tailscale`; any write produces
+schema 5. `doctor` JSON reports `overlay`, `overlay_peer_present` and
+`overlay_reachable` in place of the Tailnet-named fields.
+
+With WireGuard, the location and capture listeners bind a private address of
+the Mac that the tunnel routes to, usually its LAN address. The TLS pin and
+bearer tokens still bound them, but they are reachable from that LAN as well
+as from the overlay. Wildcard and loopback binds stay rejected.
+
+Motivation: a 368 MB Debug install over 5G took about 14 minutes (~3.7 Mbps)
+while Tailscale had no direct path, far below the home uplink's capacity. A
+WireGuard server behind a forwarded UDP port gives a guaranteed direct path.
+RemotePairing acquisition still requires the iPhone on Wi-Fi; only the overlay
+changes. XCTest results record transport `ios-ota-wireguard-rsd` for this
+overlay.

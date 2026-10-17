@@ -8,7 +8,7 @@ The iPhone pairing entry remains exactly **iOS OTA**.
 ## English
 
 Install, capture, run native tests and control system location beyond the local network. iOS OTA keeps one
-authenticated Apple RemotePairing tunnel open over Tailscale, so a signed iOS
+authenticated Apple RemotePairing tunnel open over Tailscale or WireGuard, so a signed iOS
 app built on a Mac can be installed on a paired iPhone after the phone roams
 from Wi-Fi to 5G.
 
@@ -28,13 +28,14 @@ signed .app -> iOS OTA CLI -> owner-only Unix socket
                             persistent bridge on macOS
                                       |
                                       v
-                              Tailscale -> iPhone
+                      Tailscale or WireGuard -> iPhone
 ```
 
 ### Current network boundary
 
 - The Mac and iPhone may be on different physical networks.
-- Both devices must be online in the same Tailscale tailnet.
+- The Mac must reach a stable iPhone address: its Tailscale IP, or its tunnel
+  IP on a WireGuard network that routes to the Mac.
 - The bridge must first become `active` while iOS exposes RemotePairing. Any
   Wi-Fi connection can open that listener; it does not have to be the Mac's
   LAN.
@@ -47,7 +48,8 @@ signed .app -> iOS OTA CLI -> owner-only Unix socket
 
 - Apple-silicon Mac with Xcode Command Line Tools;
 - iPhone with Developer Mode enabled;
-- Tailscale signed into the same tailnet on the Mac and iPhone;
+- Tailscale signed into the same tailnet on the Mac and iPhone, or a WireGuard
+  tunnel on the iPhone whose peer routes between it and the Mac;
 - an Apple RemotePairing record trusted by the iPhone;
 - an Xcode project configured with valid iOS development signing.
 
@@ -130,7 +132,7 @@ existing runtime/build root when required; profiles and credentials stay put.
 
 Keep the iPhone on any Wi-Fi for this first acquisition. Replace the values
 below with the RemotePairing identifier, the iPhone's Tailscale IP, and the
-absolute path to its pairing record:
+absolute path to its pairing record. For WireGuard, see the next section:
 
 ```sh
 ios_ota="$HOME/.local/bin/lyo-nodus-ios-ota"
@@ -140,7 +142,7 @@ profile="$HOME/Library/Application Support/Lyo Nodus iOS OTA/iphone.json"
   --profile "$profile" \
   --device-label "development iphone" \
   --remote-identifier "REMOTE-PAIRING-IDENTIFIER" \
-  --target-tailnet-ip "TAILSCALE-IP" \
+  --target-ip "TAILSCALE-IP" \
   --pair-record "$HOME/.pymobiledevice3/remote_REMOTE-PAIRING-IDENTIFIER.plist"
 
 "$ios_ota" doctor --profile "$profile"
@@ -151,6 +153,41 @@ profile="$HOME/Library/Application Support/Lyo Nodus iOS OTA/iphone.json"
 Do not switch the iPhone to 5G until `status` reports `active`. The default
 RemotePairing port is `49152`; pass `--remote-pairing-port` to `configure` only
 when the discovered listener uses a different port.
+
+#### WireGuard instead of Tailscale
+
+Tailscale falls back to a TCP relay when neither side accepts a direct UDP
+path, which is slow for large apps over cellular. A WireGuard server with a
+forwarded UDP port always gives a direct path. Requirements:
+
+- the iPhone's WireGuard tunnel stays on across Wi-Fi and cellular (On-Demand),
+  so its tunnel IP does not change during the roam;
+- `PersistentKeepalive = 25` on the iPhone, because the Mac opens the
+  connections and carrier NAT drops idle UDP mappings;
+- the Mac has a route to the iPhone's tunnel IP, and the server lets the Mac
+  open TCP connections to it on any port: RemotePairing starts on `49152`,
+  then opens its data tunnel on a dynamic port the iPhone picks;
+- keep the iPhone unlocked during large installs. With the screen locked, one
+  transfer over cellular stalled until the Mac's TCP connection timed out.
+
+Configure the profile with `--overlay wireguard` and the iPhone's tunnel IP,
+which must be a private address:
+
+```sh
+"$ios_ota" configure \
+  --profile "$profile" \
+  --device-label "development iphone" \
+  --remote-identifier "REMOTE-PAIRING-IDENTIFIER" \
+  --overlay wireguard \
+  --target-ip "IPHONE-WIREGUARD-IP" \
+  --pair-record "$HOME/.pymobiledevice3/remote_REMOTE-PAIRING-IDENTIFIER.plist"
+```
+
+`doctor` then checks reachability with ICMP instead of the `tailscale` CLI.
+Location and capture listeners bind a private address of the Mac that the
+tunnel routes to, usually its LAN IP. They stay protected by their TLS pin and
+bearer tokens, but are reachable from that LAN, not only from the overlay.
+Schema-4 profiles (`target_tailnet_ip`) still load as Tailscale.
 
 ### 4. Build and sign with Xcode
 
@@ -229,7 +266,7 @@ see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## 中文
 
-iOS OTA 用于在局域网之外安装由 Xcode 构建的 App。它通过 Tailscale
+iOS OTA 用于在局域网之外安装由 Xcode 构建的 App。它通过 Tailscale 或 WireGuard
 持续保有一条经过认证的 Apple RemotePairing 隧道，使 Mac 上由 Xcode 构建并
 签名的 iOS App，可以在已配对的 iPhone 从 Wi-Fi 切换到 5G 后继续安装。
 
@@ -248,13 +285,14 @@ Xcode 构建和签名
                               macOS 常驻 bridge
                                       |
                                       v
-                               Tailscale -> iPhone
+                       Tailscale 或 WireGuard -> iPhone
 ```
 
 ### 当前网络边界
 
 - Mac 和 iPhone 可以位于不同的物理网络。
-- 两台设备必须在线并加入同一个 Tailscale tailnet。
+- Mac 必须能访问 iPhone 的固定地址：Tailscale IP，或可路由到 Mac 的
+  WireGuard 隧道 IP。
 - iOS 暴露 RemotePairing listener 时，bridge 必须先进入 `active`。任意 Wi-Fi
   都可以打开该 listener，不要求与 Mac 位于同一个局域网。
 - bridge 激活后，同一条 session 可以跨越 Wi-Fi 到 5G 的切换，并用于多次安装。
@@ -265,7 +303,8 @@ Xcode 构建和签名
 
 - Apple 芯片 Mac，并安装 Xcode Command Line Tools；
 - iPhone 已开启 Developer Mode；
-- Mac 和 iPhone 已登录同一个 Tailscale tailnet；
+- Mac 和 iPhone 已登录同一个 Tailscale tailnet，或 iPhone 上的 WireGuard
+  隧道可在 iPhone 与 Mac 之间路由；
 - iPhone 已信任的 Apple RemotePairing record；
 - 已正确配置 iOS 开发签名的 Xcode 项目。
 
@@ -325,7 +364,7 @@ profile="$HOME/Library/Application Support/Lyo Nodus iOS OTA/iphone.json"
   --profile "$profile" \
   --device-label "development iphone" \
   --remote-identifier "REMOTE-PAIRING-IDENTIFIER" \
-  --target-tailnet-ip "TAILSCALE-IP" \
+  --target-ip "TAILSCALE-IP" \
   --pair-record "$HOME/.pymobiledevice3/remote_REMOTE-PAIRING-IDENTIFIER.plist"
 
 "$ios_ota" doctor --profile "$profile"
@@ -336,6 +375,13 @@ profile="$HOME/Library/Application Support/Lyo Nodus iOS OTA/iphone.json"
 必须等 `status` 显示 `active` 后，才能把 iPhone 切换到 5G。默认 RemotePairing
 端口是 `49152`；只有实际发现的 listener 使用其他端口时，才需要在 `configure`
 中传入 `--remote-pairing-port`。
+
+使用 WireGuard 时，在 `configure` 中传入 `--overlay wireguard`，并以 iPhone 的
+私有隧道 IP 作为 `--target-ip`。iPhone 隧道需在 Wi-Fi 与蜂窝网络间保持开启
+（On-Demand），设置 `PersistentKeepalive = 25`；Mac 需有到该 IP 的路由，且服务器
+允许 Mac 主动连接 iPhone 的任意 TCP 端口（RemotePairing 先用 `49152`，随后数据隧道
+使用 iPhone 选择的动态端口）。大文件安装期间请保持 iPhone 解锁。详见英文 “WireGuard instead of
+Tailscale” 一节。schema-4 profile（`target_tailnet_ip`）仍按 Tailscale 读取。
 
 ### 4. 使用 Xcode 构建并签名
 
@@ -438,7 +484,7 @@ Before service activation, provision the connection document:
 
 ```sh
 "$ios_ota" configure-location --profile "$profile" \
-  --listen "HOST_TAILNET_IPV4:61443" --output "/absolute/private/connection.json"
+  --listen "HOST_OVERLAY_IPV4:61443" --output "/absolute/private/connection.json"
 "$ios_ota" launch-agent install --profile "$profile"
 ```
 

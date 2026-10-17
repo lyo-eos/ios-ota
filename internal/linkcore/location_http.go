@@ -40,11 +40,11 @@ type LocationConnection struct {
 	Token             string `json:"token"`
 }
 
-func (c LocationConfig) validate() error {
+func (c LocationConfig) validate(overlay string) error {
 	host, port, err := net.SplitHostPort(c.Listen)
 	portNumber, portErr := strconv.Atoi(port)
-	if err != nil || portErr != nil || portNumber < 1024 || portNumber > 65535 || net.ParseIP(host).To4() == nil || !validCaptureBindAddress(host) || !filepath.IsAbs(c.Credentials) {
-		return errors.New("location requires a local Tailnet address, explicit port and absolute credential path")
+	if err != nil || portErr != nil || portNumber < 1024 || portNumber > 65535 || net.ParseIP(host).To4() == nil || !validCaptureBindAddress(overlay, host) || !filepath.IsAbs(c.Credentials) {
+		return errors.New("location requires a local " + overlay + " IPv4 address, explicit port and absolute credential path")
 	}
 	return nil
 }
@@ -71,7 +71,7 @@ func ConfigureLocation(profile, listen, output string) error {
 	}
 	credentialsPath := filepath.Join(filepath.Dir(profile), "ios-ota-location.json")
 	location := LocationConfig{Listen: listen, Credentials: credentialsPath}
-	if err := location.validate(); err != nil {
+	if err := location.validate(config.Overlay); err != nil {
 		return err
 	}
 	host, _, _ := net.SplitHostPort(listen)
@@ -118,8 +118,8 @@ func ConfigureLocation(profile, listen, output string) error {
 	}
 	return nil
 }
-func startLocationHTTPS(ctx context.Context, config LocationConfig, session *locationSession, active func() bool) (*http.Server, error) {
-	if err := config.validate(); err != nil {
+func startLocationHTTPS(ctx context.Context, overlay string, config LocationConfig, session *locationSession, active func() bool) (*http.Server, error) {
+	if err := config.validate(overlay); err != nil {
 		return nil, err
 	}
 	if err := requirePrivateRegularFile(config.Credentials, "location_credentials_missing", "location_credentials_permissions"); err != nil {

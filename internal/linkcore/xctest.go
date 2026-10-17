@@ -43,15 +43,15 @@ type TestRunResult struct {
 var testSelector = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*/test[A-Za-z0-9_]+$`)
 var testBundleName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\.xctest$`)
 
-func validateTestRun(r *TestRunRequest) error {
+func validateTestRun(r *TestRunRequest, overlay string) error {
 	if r == nil || !validBundleIdentifier(r.AppID) || !validBundleIdentifier(r.RunnerID) || !testBundleName.MatchString(r.TestBundle) {
 		return coded("test_request_invalid", "run-tests requires valid app, runner and test bundle identifiers", nil)
 	}
 	if len(r.Tests) == 0 || len(r.Tests) > 256 || r.TimeoutSeconds < 30 || r.TimeoutSeconds > 1800 {
 		return coded("test_request_invalid", "select 1–256 test methods and a timeout of 30–1800 seconds", nil)
 	}
-	if r.CaptureBindAddress != "" && !validCaptureBindAddress(r.CaptureBindAddress) {
-		return coded("test_request_invalid", "capture bind address must be a local Tailscale IP", nil)
+	if r.CaptureBindAddress != "" && !validCaptureBindAddress(overlay, r.CaptureBindAddress) {
+		return coded("test_request_invalid", "capture bind address must be a local "+overlay+" address", nil)
 	}
 	seen := make(map[string]bool)
 	for _, selector := range r.Tests {
@@ -91,7 +91,7 @@ func (s *Session) RunTests(ctx context.Context, request TestRunRequest, log io.W
 			return nil, err
 		}
 		defer closeReader()
-		bridge, err := startCaptureBridge(ctx, request.CaptureBindAddress, reader)
+		bridge, err := startCaptureBridge(ctx, s.overlay, request.CaptureBindAddress, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -178,7 +178,7 @@ func verifyTestEvidence(result *TestRunResult, request TestRunRequest, attachmen
 }
 
 func (d *Daemon) runTests(ctx context.Context, request TestRunRequest) (Response, error) {
-	if err := validateTestRun(&request); err != nil {
+	if err := validateTestRun(&request, d.config.Overlay); err != nil {
 		return Response{}, err
 	}
 	if !d.operationMu.TryLock() {
@@ -201,7 +201,11 @@ func (d *Daemon) runTests(ctx context.Context, request TestRunRequest) (Response
 		return Response{}, err
 	}
 	defer log.Close()
-	result := TestRunResult{Generation: d.Snapshot().Generation, Transport: "ios-ota-tailnet-rsd", StartedAt: time.Now().UTC(), RequestedTests: request.Tests}
+	transport := "ios-ota-tailnet-rsd"
+	if d.config.Overlay == OverlayWireGuard {
+		transport = "ios-ota-wireguard-rsd"
+	}
+	result := TestRunResult{Generation: d.Snapshot().Generation, Transport: transport, StartedAt: time.Now().UTC(), RequestedTests: request.Tests}
 	testCtx, cancel := context.WithTimeout(ctx, time.Duration(request.TimeoutSeconds)*time.Second)
 	defer cancel()
 	result.Suites, err = session.RunTests(testCtx, request, log, attachments)

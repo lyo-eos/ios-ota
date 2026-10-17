@@ -16,6 +16,7 @@ import (
 type Session struct {
 	device    ios.DeviceEntry
 	tunnel    tunnel.Tunnel
+	overlay   string
 	closeOnce sync.Once
 }
 
@@ -26,7 +27,7 @@ func classifyTunnelError(err error) error {
 		strings.Contains(message, "dial timed out"),
 		strings.Contains(message, "i/o timeout"),
 		strings.Contains(message, "no route to host"):
-		return coded("remote_pairing_cold", "Tailnet is reachable but iOS exposes no usable RemotePairing listener", err)
+		return coded("remote_pairing_cold", "the iPhone is reachable but iOS exposes no usable RemotePairing listener", err)
 	case strings.Contains(message, "pair verification failed"), strings.Contains(message, "saved identity was rejected"):
 		return coded("pair_verify_failed", "the endpoint rejected the configured pairing record", err)
 	default:
@@ -46,7 +47,7 @@ func OpenSession(ctx context.Context, config Config) (*Session, error) {
 	tun, err := tunnel.ConnectRemotePairingTCPUserspace(
 		ctx,
 		device,
-		config.TargetTailnetIP,
+		config.TargetIP,
 		config.RemotePairingPort,
 		config.LocalForwardPort,
 		pairRecords,
@@ -64,7 +65,7 @@ func OpenSession(ctx context.Context, config Config) (*Session, error) {
 		_ = tun.Close()
 		return nil, err
 	}
-	session := &Session{device: device, tunnel: tun}
+	session := &Session{device: device, tunnel: tun, overlay: config.Overlay}
 	if _, err := session.browseUserApps(ctx); err != nil {
 		_ = session.Close()
 		return nil, coded("tunnel_failed", "InstallationProxy readiness check failed", err)

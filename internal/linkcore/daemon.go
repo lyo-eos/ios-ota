@@ -254,7 +254,7 @@ func (d *Daemon) handleConnection(ctx context.Context, connection net.Conn) {
 		_ = writeOneResponse(connection, errorResponse(err))
 		return
 	}
-	if err := validateCommand(request); err != nil {
+	if err := validateCommand(request, d.config.Overlay); err != nil {
 		_ = writeOneResponse(connection, errorResponse(err))
 		return
 	}
@@ -338,7 +338,7 @@ func (d *Daemon) Serve(parent context.Context) error {
 	d.cancel = cancel
 	defer cancel()
 	if d.config.Location != nil {
-		server, err := startLocationHTTPS(ctx, *d.config.Location, d.location, func() bool { return d.currentSession() != nil })
+		server, err := startLocationHTTPS(ctx, d.config.Overlay, *d.config.Location, d.location, func() bool { return d.currentSession() != nil })
 		if err != nil {
 			return err
 		}

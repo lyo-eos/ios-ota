@@ -1,6 +1,7 @@
 package linkcore
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +14,13 @@ import (
 	"time"
 )
 
-const SchemaVersion = 4
+const SchemaVersion = 5
+
+// Overlays that can carry the RemotePairing tunnel to the iPhone.
+const (
+	OverlayTailscale = "tailscale"
+	OverlayWireGuard = "wireguard"
+)
 
 var remoteIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9-]{8,128}$`)
 var tailscaleIPv4 = netip.MustParsePrefix("100.64.0.0/10")
@@ -24,7 +31,8 @@ type Config struct {
 	SchemaVersion         int             `json:"schema_version"`
 	DeviceLabel           string          `json:"device_label"`
 	RemoteIdentifier      string          `json:"remote_identifier"`
-	TargetTailnetIP       string          `json:"target_tailnet_ip"`
+	Overlay               string          `json:"overlay"`
+	TargetIP              string          `json:"target_ip"`
 	RemotePairingPort     int             `json:"remote_pairing_port"`
 	PairRecordPath        string          `json:"pair_record_path"`
 	LocalForwardPort      int             `json:"local_forward_port"`
@@ -33,9 +41,17 @@ type Config struct {
 	InstallTimeoutSeconds int             `json:"install_timeout_seconds"`
 }
 
+// profileV4 is the schema before overlays existed; its target was always a
+// Tailscale address. LoadConfig upgrades it in memory.
+type profileV4 struct {
+	Config
+	TargetTailnetIP string `json:"target_tailnet_ip"`
+}
+
 func DefaultConfig() Config {
 	return Config{
 		SchemaVersion:         SchemaVersion,
+		Overlay:               OverlayTailscale,
 		RemotePairingPort:     49152,
 		LocalForwardPort:      61015,
 		ConnectTimeoutSeconds: 12,
@@ -71,11 +87,6 @@ func validateSeconds(name string, value int, minimum int, maximum int) error {
 }
 
 func (c Config) Validate() error {
-	if c.Location != nil {
-		if err := c.Location.validate(); err != nil {
-			return err
-		}
-	}
 	if c.SchemaVersion != SchemaVersion {
 		return coded("profile_invalid", fmt.Sprintf("schema_version must be %d", SchemaVersion), nil)
 	}
@@ -85,9 +96,16 @@ func (c Config) Validate() error {
 	if !remoteIdentifierPattern.MatchString(c.RemoteIdentifier) {
 		return coded("profile_invalid", "remote_identifier has an invalid format", nil)
 	}
-	address, err := netip.ParseAddr(c.TargetTailnetIP)
-	if err != nil || (!tailscaleIPv4.Contains(address) && !tailscaleIPv6.Contains(address)) {
-		return coded("profile_invalid", "target_tailnet_ip must be a Tailscale IP address", err)
+	if c.Overlay != OverlayTailscale && c.Overlay != OverlayWireGuard {
+		return coded("profile_invalid", `overlay must be "tailscale" or "wireguard"`, nil)
+	}
+	if !IsOverlayAddress(c.Overlay, c.TargetIP) {
+		return coded("profile_invalid", "target_ip must be a Tailscale IP for the tailscale overlay, or a private IP for the wireguard overlay", nil)
+	}
+	if c.Location != nil {
+		if err := c.Location.validate(c.Overlay); err != nil {
+			return err
+		}
 	}
 	if err := validatePort("remote_pairing_port", c.RemotePairingPort); err != nil {
 		return err
@@ -135,19 +153,42 @@ func LoadConfig(path string) (Config, error) {
 	if err != nil {
 		return Config{}, coded("profile_invalid", "could not read profile", err)
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
-	var config Config
-	if err := decoder.Decode(&config); err != nil {
-		return Config{}, coded("profile_invalid", "could not decode schema-4 profile", err)
+	var header struct {
+		SchemaVersion int `json:"schema_version"`
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return Config{}, coded("profile_invalid", "profile must contain exactly one JSON object", err)
+	_ = json.Unmarshal(data, &header)
+	var config Config
+	if header.SchemaVersion == 4 {
+		var legacy profileV4
+		if err := decodeProfile(data, &legacy); err != nil {
+			return Config{}, err
+		}
+		if legacy.Overlay != "" || legacy.TargetIP != "" {
+			return Config{}, coded("profile_invalid", "a schema-4 profile cannot set overlay or target_ip", nil)
+		}
+		config = legacy.Config
+		config.SchemaVersion = SchemaVersion
+		config.Overlay = OverlayTailscale
+		config.TargetIP = legacy.TargetTailnetIP
+	} else if err := decodeProfile(data, &config); err != nil {
+		return Config{}, err
 	}
 	if err := config.Validate(); err != nil {
 		return Config{}, err
 	}
 	return config, nil
+}
+
+func decodeProfile(data []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return coded("profile_invalid", "could not decode profile", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return coded("profile_invalid", "profile must contain exactly one JSON object", err)
+	}
+	return nil
 }
 
 func ValidatePairRecord(config Config) error {

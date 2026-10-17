@@ -96,13 +96,24 @@ func TestCaptureBridgeRejectsInvalidImageAndBind(t *testing.T) {
 		t.Fatal("invalid image accepted")
 	}
 	for _, address := range []string{"", "0.0.0.0", "127.0.0.1", "192.168.1.1", "::", "100.128.0.1", "example.com"} {
-		if validCaptureBindAddress(address) {
+		if validCaptureBindAddress(OverlayTailscale, address) {
 			t.Fatalf("unsafe bind %s", address)
 		}
 	}
 	for _, address := range []string{"100.64.0.1", "100.127.255.254", "fd7a:115c:a1e0::1"} {
-		if !validCaptureBindAddress(address) {
+		if !validCaptureBindAddress(OverlayTailscale, address) {
 			t.Fatalf("valid tailnet bind rejected %s", address)
 		}
+	}
+	for _, address := range []string{"", "0.0.0.0", "127.0.0.1", "::", "203.0.113.1", "example.com"} {
+		if validCaptureBindAddress(OverlayWireGuard, address) {
+			t.Fatalf("unsafe wireguard bind %s", address)
+		}
+	}
+	if !validCaptureBindAddress(OverlayWireGuard, "192.168.50.10") {
+		t.Fatal("private LAN bind rejected for wireguard")
+	}
+	if _, err := startCaptureBridge(context.Background(), OverlayWireGuard, "0.0.0.0", nil); errorCode(err) != "capture_bind_invalid" {
+		t.Fatalf("wildcard bind error = %v, want capture_bind_invalid", err)
 	}
 }

@@ -10,7 +10,6 @@ import (
 	"image/png"
 	"net"
 	"net/http"
-	"net/netip"
 	"sync"
 	"time"
 )
@@ -23,18 +22,20 @@ type captureBridge struct {
 	closeOnce sync.Once
 }
 
-func validCaptureBindAddress(value string) bool {
-	ip, err := netip.ParseAddr(value)
-	return err == nil && (netip.MustParsePrefix("100.64.0.0/10").Contains(ip) || netip.MustParsePrefix("fd7a:115c:a1e0::/48").Contains(ip))
+// validCaptureBindAddress keeps phone-facing listeners off wildcard and
+// loopback binds: a Tailscale IP, or with WireGuard the Mac's private LAN IP
+// that the tunnel routes to.
+func validCaptureBindAddress(overlay string, value string) bool {
+	return IsOverlayAddress(overlay, value)
 }
 
-func startCaptureBridge(ctx context.Context, address string, take func(context.Context) ([]byte, error)) (*captureBridge, error) {
-	if !validCaptureBindAddress(address) {
-		return nil, coded("capture_bind_invalid", "a local Tailscale IP is required", nil)
+func startCaptureBridge(ctx context.Context, overlay string, address string, take func(context.Context) ([]byte, error)) (*captureBridge, error) {
+	if !validCaptureBindAddress(overlay, address) {
+		return nil, coded("capture_bind_invalid", "a local "+overlay+" address is required", nil)
 	}
 	listener, err := net.Listen("tcp", net.JoinHostPort(address, "0"))
 	if err != nil {
-		return nil, coded("capture_bind_failed", "could not bind the selected local Tailscale address", err)
+		return nil, coded("capture_bind_failed", "could not bind the selected local "+overlay+" address", err)
 	}
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {

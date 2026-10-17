@@ -144,16 +144,16 @@ func TestRunRejectsBusyAndExistingOutput(t *testing.T) {
 
 func TestRunControlValidation(t *testing.T) {
 	request := testRunRequest(t)
-	if err := validateCommand(Request{Command: "run-tests", TestRun: &request}); err != nil {
+	if err := validateCommand(Request{Command: "run-tests", TestRun: &request}, OverlayTailscale); err != nil {
 		t.Fatal(err)
 	}
 	for _, command := range []Request{{Command: "run-tests"}, {Command: "status", TestRun: &request}, {Command: "run-tests", TestRun: &request, AppPath: "app"}} {
-		if err := validateCommand(command); err == nil {
+		if err := validateCommand(command, OverlayTailscale); err == nil {
 			t.Fatal("invalid mixed command accepted")
 		}
 	}
 	request.Tests = append(request.Tests, request.Tests[0])
-	if err := validateTestRun(&request); err == nil {
+	if err := validateTestRun(&request, OverlayTailscale); err == nil {
 		t.Fatal("duplicate tests accepted")
 	}
 }
