@@ -9,10 +9,22 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"time"
 )
 
 const ServiceName = "Lyo Nodus iOS OTA"
 const ServiceLabel = "lyo-nodus-ios-ota"
+
+// launchctl runs /bin/launchctl and returns its combined output; tests
+// replace it.
+var launchctl = func(arguments ...string) ([]byte, error) {
+	return exec.Command("/bin/launchctl", arguments...).CombinedOutput()
+}
+
+var (
+	launchAgentRestartTimeout = 10 * time.Second
+	launchAgentPollInterval   = 100 * time.Millisecond
+)
 
 func LaunchAgentPath() string {
 	return filepath.Join(os.Getenv("HOME"), "Library", "LaunchAgents", ServiceLabel+".plist")
@@ -86,16 +98,39 @@ func InstallLaunchAgent(binaryPath string, profilePath string) error {
 	if err := writeAtomic(path, contents, 0o644); err != nil {
 		return coded("launch_agent_failed", "could not write LaunchAgent", err)
 	}
-	_ = exec.Command("/bin/launchctl", "bootout", launchServiceTarget()).Run()
-	if output, err := exec.Command("/bin/launchctl", "bootstrap", launchTarget(), path).CombinedOutput(); err != nil {
-		return coded("launch_agent_failed", fmt.Sprintf("launchctl bootstrap failed (%d diagnostic bytes)", len(output)), err)
+	return restartLaunchAgent(path)
+}
+
+// restartLaunchAgent replaces the loaded job with the plist at path. bootout
+// returns before launchd has torn the old job down, and bootstrapping the same
+// label in that window fails with an I/O error, so wait for the old job to go
+// and retry bootstrap until the deadline.
+func restartLaunchAgent(path string) error {
+	_, _ = launchctl("bootout", launchServiceTarget())
+	deadline := time.Now().Add(launchAgentRestartTimeout)
+	for launchAgentLoaded() && time.Now().Before(deadline) {
+		time.Sleep(launchAgentPollInterval)
 	}
-	return nil
+	for {
+		output, err := launchctl("bootstrap", launchTarget(), path)
+		if err == nil {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return coded("launch_agent_failed", fmt.Sprintf("launchctl bootstrap failed (%d diagnostic bytes)", len(output)), err)
+		}
+		time.Sleep(launchAgentPollInterval)
+	}
+}
+
+func launchAgentLoaded() bool {
+	_, err := launchctl("print", launchServiceTarget())
+	return err == nil
 }
 
 func RemoveLaunchAgent() error {
 	path := LaunchAgentPath()
-	_ = exec.Command("/bin/launchctl", "bootout", launchServiceTarget()).Run()
+	_, _ = launchctl("bootout", launchServiceTarget())
 	err := os.Remove(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return coded("launch_agent_failed", "could not remove LaunchAgent plist", err)
