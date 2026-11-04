@@ -1,8 +1,8 @@
 # iOS OTA Architecture
 
-Document revision: `1.4.2`
+Document revision: `1.5.0`
 
-Revised: `2026-09-17`
+Revised: `2026-11-03`
 
 ## Decision
 
@@ -16,6 +16,36 @@ The CLI is a short-lived client. It communicates only through a profile-scoped,
 owner-only Unix socket. An explicitly configured location-only HTTPS endpoint
 accepts a device-scoped credential on the host Tailnet address. It cannot
 install/remove apps, read files, or invoke arbitrary developer services.
+
+## Exact App installation identity
+
+An installation is accepted only after InstallationProxy returns the requested
+bundle identifier, `CFBundleShortVersionString` and `CFBundleVersion` together.
+Read these three fields from the signed App before transfer. Require bounded,
+nonempty versions; reject missing or malformed metadata before sending bytes.
+Bundle presence alone cannot prove that an update replaced an older build.
+
+The final `installed` response contains `app` with exactly `bundle_identifier`,
+`version` and `build`, plus `observed_at` from the completed phone readback.
+No local path, signature material or app inventory is included. A mismatched,
+missing, duplicate or malformed device record is a failed installation; it
+must not increment the successful-install counter or report the requested
+version as observed. This receipt proves installed metadata, not App launch,
+UI behavior or the byte identity of every installed file.
+
+The owner-only `app-read` command takes one exact bundle identifier and returns
+that same three-field object, or null when absent. It reads the current phone
+through the existing paired tunnel under the daemon's operation lock; it never
+installs, removes, launches or returns other applications. A failed query is
+not an absent App. The read has a bounded service deadline and does not alter
+the install/uninstall counters. It permits an installer to reconcile a lost
+response without blindly repeating a side effect.
+
+The source baseline includes the previously deployed `lyo-proxy-location`
+branch through `d318d87`; retain its location ownership and recovery behavior.
+This release adds exact readback, not Chicago job arbitration. Central jobs,
+durable operation receipts and serialization across two Macs remain a separate
+integration boundary. Each Mac retains its own existing pairing and profile.
 
 ## iOS OTA location extension and naming
 
@@ -179,7 +209,7 @@ bug without evidence. Keep both working identities intact during diagnosis.
 | Warm session | The long-running iOS OTA daemon |
 | App transfer | Streaming zip conduit over the live RSD session |
 | App removal | InstallationProxy for one explicit bundle identifier |
-| Success readback | InstallationProxy bundle presence or absence enumeration |
+| Success readback | InstallationProxy exact bundle/version/build, or verified absence for removal |
 
 iOS OTA consumes an existing signed `.app`. It does not become an Xcode Run
 Destination, select a signing team, modify a project, or weaken iOS signature
@@ -219,9 +249,10 @@ causes iOS to expose RemotePairing again.
 
 ## Source and dependency boundary
 
-- Public source mirror:
-  `zjz-connect/ios-ota`;
-- Git fetch authority: `/srv/contabo/git/ios-ota.git`;
+- Sole Git authority: `https://github.com/lyo-eos/ios-ota.git`, branch `main`;
+- Secondary Git backup: `win-desktop-codex:N:/Git/ios-ota.git`, the same bare
+  repository visible at `/Volumes/NAS/Git/ios-ota.git`. Ordinary pushes publish
+  to GitHub first and NAS second. Contabo has no source or release role;
 - Go toolchain: `1.26.5` for macOS arm64;
 - Link Core upstream: `danielpaulus/go-ios` commit
   `3ebc297691a9e364772aef027744ebc0c49421a5`;

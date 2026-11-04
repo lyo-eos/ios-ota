@@ -1,6 +1,6 @@
 # iOS OTA
 
-Documentation revision: `1.4.2`.
+Documentation revision: `1.5.0`.
 
 Mac background service: **Lyo Nodus iOS OTA** (`lyo-nodus-ios-ota`).
 The existing MacBook pairing remains **iOS OTA**. The independently paired
@@ -10,7 +10,7 @@ Mac mini entry is **iOS OTA Mac Mini**, as selected by the owner.
 
 ## English
 
-Install, capture, run native tests and control system location beyond the local network. iOS OTA keeps one
+Install, inspect the exact installed App version, capture, run native tests and control system location beyond the local network. iOS OTA keeps one
 authenticated Apple RemotePairing tunnel open over Tailscale, so a signed iOS
 app built on a Mac can be installed on a paired iPhone after the phone roams
 from Wi-Fi to 5G.
@@ -33,6 +33,20 @@ signed .app -> iOS OTA CLI -> owner-only Unix socket
                                       v
                               Tailscale -> iPhone
 ```
+
+### Exact installed version
+
+`install` verifies the signed App and accepts success only when the phone
+reports the same bundle identifier, version and build. Query that identity
+independently through the existing daemon:
+
+```sh
+~/.local/bin/lyo-nodus-ios-ota app-read --profile /absolute/path/iphone.json lyo.nodus
+```
+
+The result contains only the requested App metadata, or `app: null` when the
+phone confirms its absence. A service failure is an error. Readback does not
+prove that the App launched or that its UI works.
 
 ### Current network boundary
 
@@ -254,6 +268,18 @@ Xcode 构建和签名
                                       v
                                Tailscale -> iPhone
 ```
+
+### 精确安装回读
+
+`install` 校验签名后，必须从手机读到相同的 bundle identifier、版本和 build，
+才会报告成功。可以通过现有守护进程独立查询：
+
+```sh
+~/.local/bin/lyo-nodus-ios-ota app-read --profile /absolute/path/iphone.json lyo.nodus
+```
+
+结果只包含指定 App 的安装信息；手机确认未安装时返回 `app: null`。
+服务查询失败会返回错误，不能当作未安装。安装回读与 App 启动、界面验收分别验证。
 
 ### 当前网络边界
 
