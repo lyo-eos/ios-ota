@@ -14,12 +14,14 @@ import (
 )
 
 type fakeSession struct {
-	runTests   func(context.Context, TestRunRequest, io.Writer, string) ([]testmanagerd.TestSuite, error)
-	screenshot func(context.Context) ([]byte, error)
-	closed     atomic.Int32
-	done       chan error
-	install    func(context.Context, AppBundle, func(int, string)) error
-	uninstall  func(context.Context, string) error
+	runTests     func(context.Context, TestRunRequest, io.Writer, string) ([]testmanagerd.TestSuite, error)
+	screenshot   func(context.Context) ([]byte, error)
+	closed       atomic.Int32
+	done         chan error
+	install      func(context.Context, AppBundle, func(int, string)) error
+	uninstall    func(context.Context, string) error
+	readApp      func(context.Context, string) (*AppIdentity, error)
+	installedApp *AppIdentity
 }
 
 func (s *fakeSession) OpenLocation(context.Context) (locationDriver, error) {
@@ -49,11 +51,23 @@ func (s *fakeSession) Done() <-chan error {
 	return s.done
 }
 
-func (s *fakeSession) Install(ctx context.Context, app AppBundle, progress func(int, string)) error {
+func (s *fakeSession) Install(ctx context.Context, app AppBundle, progress func(int, string)) (*AppIdentity, error) {
 	if s.install != nil {
-		return s.install(ctx, app, progress)
+		if err := s.install(ctx, app, progress); err != nil {
+			return nil, err
+		}
 	}
-	return nil
+	if s.installedApp != nil {
+		return s.installedApp, nil
+	}
+	return &app.AppIdentity, nil
+}
+
+func (s *fakeSession) ReadApp(ctx context.Context, bundleIdentifier string) (*AppIdentity, error) {
+	if s.readApp != nil {
+		return s.readApp(ctx, bundleIdentifier)
+	}
+	return nil, nil
 }
 
 func (s *fakeSession) Uninstall(ctx context.Context, bundleIdentifier string) error {
@@ -128,7 +142,7 @@ func TestDaemonClassifiesColdAcquisition(t *testing.T) {
 func TestDaemonSerializesInstalls(t *testing.T) {
 	daemon := testDaemon(t)
 	daemon.validateApp = func(context.Context, string) (AppBundle, error) {
-		return AppBundle{Path: "/tmp/Test.app", BundleIdentifier: "one.example.test"}, nil
+		return AppBundle{Path: "/tmp/Test.app", AppIdentity: AppIdentity{BundleIdentifier: "one.example.test", Version: "1.2", Build: "3"}}, nil
 	}
 	var running atomic.Int32
 	var maximum atomic.Int32
@@ -151,7 +165,8 @@ func TestDaemonSerializesInstalls(t *testing.T) {
 	results := make(chan error, 2)
 	for range 2 {
 		go func() {
-			results <- daemon.install(context.Background(), "/tmp/Test.app", func(int, string) {})
+			_, err := daemon.install(context.Background(), "/tmp/Test.app", func(int, string) {})
+			results <- err
 		}()
 	}
 	for range 2 {
@@ -170,7 +185,7 @@ func TestDaemonSerializesInstalls(t *testing.T) {
 func TestDaemonSerializesInstallAndUninstall(t *testing.T) {
 	daemon := testDaemon(t)
 	daemon.validateApp = func(context.Context, string) (AppBundle, error) {
-		return AppBundle{Path: "/tmp/Test.app", BundleIdentifier: "one.example.test"}, nil
+		return AppBundle{Path: "/tmp/Test.app", AppIdentity: AppIdentity{BundleIdentifier: "one.example.test", Version: "1.2", Build: "3"}}, nil
 	}
 	var running atomic.Int32
 	var maximum atomic.Int32
@@ -200,7 +215,8 @@ func TestDaemonSerializesInstallAndUninstall(t *testing.T) {
 
 	results := make(chan error, 2)
 	go func() {
-		results <- daemon.install(context.Background(), "/tmp/Test.app", func(int, string) {})
+		_, err := daemon.install(context.Background(), "/tmp/Test.app", func(int, string) {})
+		results <- err
 	}()
 	go func() {
 		results <- daemon.uninstall(context.Background(), "one.example.test")
@@ -221,7 +237,7 @@ func TestDaemonSerializesInstallAndUninstall(t *testing.T) {
 func TestDaemonRetainsSessionWhenInstallServiceFails(t *testing.T) {
 	daemon := testDaemon(t)
 	daemon.validateApp = func(context.Context, string) (AppBundle, error) {
-		return AppBundle{Path: "/tmp/Test.app", BundleIdentifier: "one.example.test"}, nil
+		return AppBundle{Path: "/tmp/Test.app", AppIdentity: AppIdentity{BundleIdentifier: "one.example.test", Version: "1.2", Build: "3"}}, nil
 	}
 	session := &fakeSession{
 		install: func(context.Context, AppBundle, func(int, string)) error {
@@ -232,7 +248,7 @@ func TestDaemonRetainsSessionWhenInstallServiceFails(t *testing.T) {
 	daemon.state = StateActive
 	daemon.generation = 1
 
-	if err := daemon.install(context.Background(), "/tmp/Test.app", func(int, string) {}); errorCode(err) != "install_failed" {
+	if _, err := daemon.install(context.Background(), "/tmp/Test.app", func(int, string) {}); errorCode(err) != "install_failed" {
 		t.Fatalf("install error = %v, want install_failed", err)
 	}
 	if got := daemon.Snapshot(); got.State != StateRecovering || got.LastErrorCode != "service_unresponsive" || got.Generation != 1 {

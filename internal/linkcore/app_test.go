@@ -49,6 +49,7 @@ func TestValidateAppAcceptsSignedBundle(t *testing.T) {
 <key>CFBundleExecutable</key><string>NodusRemoteDeployTest</string>
 <key>CFBundleIdentifier</key><string>one.zjz.ios-ota-test</string>
 <key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>2.70.0</string>
 <key>CFBundleVersion</key><string>1</string>
 </dict></plist>`)
 	if err := os.WriteFile(filepath.Join(appPath, "Info.plist"), infoPlist, 0o644); err != nil {
@@ -65,7 +66,7 @@ func TestValidateAppAcceptsSignedBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bundle.BundleIdentifier != "one.zjz.ios-ota-test" || bundle.Path != appPath {
+	if bundle.BundleIdentifier != "one.zjz.ios-ota-test" || bundle.Path != appPath || bundle.Version != "2.70.0" || bundle.Build != "1" {
 		t.Fatalf("bundle = %#v", bundle)
 	}
 }
@@ -75,7 +76,7 @@ func TestValidateAppRejectsUnsignedBundle(t *testing.T) {
 	if err := os.Mkdir(appPath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(appPath, "Info.plist"), []byte(`<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>one.zjz.unsigned</string></dict></plist>`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(appPath, "Info.plist"), []byte(`<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>one.zjz.unsigned</string><key>CFBundleShortVersionString</key><string>1.0</string><key>CFBundleVersion</key><string>1</string></dict></plist>`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ValidateApp(context.Background(), appPath); errorCode(err) != "app_invalid" {

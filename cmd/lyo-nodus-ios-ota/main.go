@@ -136,15 +136,17 @@ func call(arguments []string, command string) error {
 			return err
 		}
 		request.AppPath = absolute
-	} else if command == "uninstall" {
+	} else if command == "uninstall" || command == "app-read" {
 		if flags.NArg() != 1 {
-			return errors.New("uninstall requires exactly one bundle identifier")
+			return fmt.Errorf("%s requires exactly one bundle identifier", command)
 		}
 		request.BundleIdentifier = flags.Arg(0)
 	}
 	timeout := 10 * time.Second
 	if command == "install" || command == "uninstall" {
 		timeout = config.InstallTimeout() + 30*time.Second
+	} else if command == "app-read" {
+		timeout = 35 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -206,7 +208,7 @@ func launchAgent(arguments []string) error {
 
 func run(arguments []string) error {
 	if len(arguments) == 0 {
-		return errors.New("command required: configure, configure-location, refresh-location, doctor, serve, status, watch, install, uninstall, stop, screenshot, run-tests, launch-agent, version")
+		return errors.New("command required: configure, configure-location, refresh-location, doctor, serve, status, watch, install, app-read, uninstall, stop, screenshot, run-tests, launch-agent, version")
 	}
 	switch arguments[0] {
 	case "refresh-location":
@@ -259,7 +261,7 @@ func run(arguments []string) error {
 		return doctor(arguments[1:])
 	case "serve":
 		return serve(arguments[1:])
-	case "status", "install", "uninstall", "stop":
+	case "status", "install", "app-read", "uninstall", "stop":
 		return call(arguments[1:], arguments[0])
 	case "watch":
 		return watch(arguments[1:])
