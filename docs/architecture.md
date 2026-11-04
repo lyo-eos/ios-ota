@@ -1,6 +1,6 @@
 # iOS OTA Architecture
 
-Document revision: `1.5.0`
+Document revision: `1.5.1`
 
 Revised: `2026-11-03`
 
@@ -414,3 +414,20 @@ InstallationProxy. Optional native background/relaunch testing was not accepted:
 iOS cancelled LocalAuthentication before the test executed, and that run was
 cancelled after the owner confirmed their manual test. The current target remains
 active. Detailed receipts are under the Lyo Proxy checkout .build/location/.
+
+## OTA 1.5.0 service acceptance, 2026-11-04
+
+Source `499a45c` is installed at the canonical executable on Mac mini and
+MacBook Air. The versioned artifact passed strict codesign verification. Each
+activation checked the preceding installed identity, an active tunnel with no
+install/uninstall operation and a reachable Apple listener. The existing
+LaunchAgent, profile, pairing record and socket paths remain unchanged; Air
+retains its configured location driver. One Mac retained its tunnel while the
+other daemon was replaced.
+
+Both new daemons recovered to active generation 1 and answered the newly added
+`app-read`. Mini read `dev.lyo.nodus` 2.69.4 (251) at 06:11:09 UTC; Air independently
+read the same identity at 06:12:18 UTC. These observations accept the service
+upgrades and exact installed-App lookup. No App installation, launch, capture or
+new location effect was performed in this boundary. Nodus candidate signing
+still requires the existing Air Keychain permission; it is not an OTA failure.
