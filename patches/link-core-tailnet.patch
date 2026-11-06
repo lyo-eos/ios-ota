@@ -1582,22 +1582,29 @@ index 0000000..9bb2d65
 +	assert.Equal(t, raw, decoded)
 +}
 diff --git a/ios/tunnel/rwcendpoint.go b/ios/tunnel/rwcendpoint.go
-index e56a38b..806b08a 100644
+index e56a38b..aee4b58 100644
 --- a/ios/tunnel/rwcendpoint.go
 +++ b/ios/tunnel/rwcendpoint.go
-@@ -50,0 +51,3 @@ type Endpoint struct {
+@@ -28,2 +28,4 @@ const (
+-	// causes packet drops.
+-	defaultOutQueueLen = 1 << 10
++	// causes packet drops, which the inner TCP reads as congestion even though
++	// the outer tunnel connection is lossless — so size it above a full send
++	// window rather than letting a bulk transfer fill it.
++	defaultOutQueueLen = 1 << 14
+@@ -50,0 +53,3 @@ type Endpoint struct {
 +	// done receives the terminal read error that stopped the inbound packet pump.
 +	done chan error
 +
-@@ -113,0 +117 @@ func RWCEndpointNew(rw io.ReadWriter, mtu uint32, offset int) (*Endpoint, error)
+@@ -113,0 +119 @@ func RWCEndpointNew(rw io.ReadWriter, mtu uint32, offset int) (*Endpoint, error)
 +		done:     make(chan error, 1),
-@@ -138,0 +143,5 @@ func (e *Endpoint) Wait() {
+@@ -138,0 +145,5 @@ func (e *Endpoint) Wait() {
 +// Done reports the terminal read error that stopped the tunnel data plane.
 +func (e *Endpoint) Done() <-chan error {
 +	return e.done
 +}
 +
-@@ -157,0 +167,2 @@ func (e *Endpoint) dispatchLoop(cancel context.CancelFunc) {
+@@ -157,0 +169,2 @@ func (e *Endpoint) dispatchLoop(cancel context.CancelFunc) {
 +			e.done <- err
 +			close(e.done)
 diff --git a/ios/tunnel/rwcendpoint_done_test.go b/ios/tunnel/rwcendpoint_done_test.go
@@ -1809,7 +1816,7 @@ index b58704b..ade576f 100644
 -		"model":                       "go-ios",
 +		"model":                       "Link Core",
 diff --git a/ios/tunnel/userspace_tunnel.go b/ios/tunnel/userspace_tunnel.go
-index 37248c5..234a51e 100644
+index 37248c5..2fd202d 100644
 --- a/ios/tunnel/userspace_tunnel.go
 +++ b/ios/tunnel/userspace_tunnel.go
 @@ -56,0 +57,5 @@ type UserSpaceTUNInterface struct {
@@ -1818,7 +1825,11 @@ index 37248c5..234a51e 100644
 +	return iface.endpoint.Done()
 +}
 +
-@@ -270,0 +276 @@ func connectToUserspaceTunnelLockdown(ctx context.Context, device ios.DeviceEntr
+@@ -154,0 +160,3 @@ func (iface *UserSpaceTUNInterface) Init(mtu uint32, connToTUNIface io.ReadWrite
++	// SACK recovers several lost segments per round trip; gVisor leaves it off.
++	sack := tcpip.TCPSACKEnabled(true)
++	iface.networkStack.SetTransportProtocolOption(tcp.ProtocolNumber, &sack)
+@@ -270,0 +279 @@ func connectToUserspaceTunnelLockdown(ctx context.Context, device ios.DeviceEntr
 +		done:    iface.Done(),
 diff --git a/ios/zipconduit/zip_utils.go b/ios/zipconduit/zip_utils.go
 index c8c99ad..a0a7382 100644
