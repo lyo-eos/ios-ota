@@ -51,7 +51,8 @@ type sessionHandle interface {
 	RunTests(context.Context, TestRunRequest, io.Writer, string) ([]testmanagerd.TestSuite, error)
 	Close() error
 	Done() <-chan error
-	Install(context.Context, AppBundle, func(int, string)) error
+	Install(context.Context, AppBundle, func(int, string)) (*AppIdentity, error)
+	ReadApp(context.Context, string) (*AppIdentity, error)
 	Uninstall(context.Context, string) error
 }
 
@@ -70,13 +71,13 @@ func NewDaemon(config Config, profilePath string) (*Daemon, error) {
 		},
 		validateApp: ValidateApp,
 	}
-	daemon.location = &locationSession{open: func(ctx context.Context) (locationDriver, error) {
+	daemon.location = newLocationSession(func(ctx context.Context) (locationDriver, error) {
 		session := daemon.currentSession()
 		if session == nil {
 			return nil, errors.New("phone tunnel is not active")
 		}
 		return session.OpenLocation(ctx)
-	}}
+	})
 	return daemon, nil
 }
 
@@ -193,34 +194,53 @@ func (d *Daemon) connectionLoop(ctx context.Context) {
 	}
 }
 
-func (d *Daemon) install(ctx context.Context, appPath string, progress func(int, string)) error {
+func (d *Daemon) install(ctx context.Context, appPath string, progress func(int, string)) (*AppIdentity, error) {
 	validationCtx, validationCancel := context.WithTimeout(ctx, 30*time.Second)
 	app, err := d.validateApp(validationCtx, appPath)
 	validationCancel()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	d.operationMu.Lock()
 	defer d.operationMu.Unlock()
 	session := d.currentSession()
 	if session == nil {
-		return coded("session_not_active", "daemon is waiting for a usable RemotePairing listener", nil)
+		return nil, coded("session_not_active", "daemon is waiting for a usable RemotePairing listener", nil)
 	}
 	d.setState(StateInstalling, "")
 	installCtx, cancel := context.WithTimeout(ctx, d.config.InstallTimeout())
-	err = session.Install(installCtx, app, progress)
+	installed, err := session.Install(installCtx, app, progress)
 	cancel()
+	if err == nil {
+		err = verifyInstalledApp(app.AppIdentity, installed)
+	}
 	if err != nil {
 		d.setState(StateRecovering, "service_unresponsive")
 		slog.Warn(ServiceName+" install service failed; retaining outer tunnel", "generation", d.Snapshot().Generation, "errorCode", errorCode(err))
-		return err
+		return nil, err
 	}
 	d.mu.Lock()
 	d.installCount++
 	d.state = StateActive
 	d.lastErrorCode = ""
 	d.mu.Unlock()
-	return nil
+	return installed, nil
+}
+
+func (d *Daemon) readApp(ctx context.Context, bundleIdentifier string) (*AppIdentity, error) {
+	// This is serialized with accepted installs and removals. An observer timeout
+	// never releases a running installation's ownership of the phone.
+	if !d.operationMu.TryLock() {
+		return nil, coded("operation_busy", "another phone operation is in progress", nil)
+	}
+	defer d.operationMu.Unlock()
+	readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	session := d.currentSession()
+	if session == nil {
+		return nil, coded("session_not_active", "daemon is waiting for a usable RemotePairing listener", nil)
+	}
+	return session.ReadApp(readCtx, bundleIdentifier)
 }
 
 func (d *Daemon) uninstall(ctx context.Context, bundleIdentifier string) error {
@@ -288,6 +308,13 @@ func (d *Daemon) handleConnection(ctx context.Context, connection net.Conn) {
 		}
 	case "status":
 		_ = encoder.Encode(snapshotResponse(d.Snapshot()))
+	case "app-read":
+		app, err := d.readApp(ctx, request.BundleIdentifier)
+		if err != nil {
+			_ = encoder.Encode(errorResponse(err))
+			return
+		}
+		_ = encoder.Encode(Response{OK: true, Final: true, Event: "app_read", AppReadback: &AppReadback{App: app}, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 	case "stop":
 		_ = encoder.Encode(Response{OK: true, Final: true, Event: "stopping", State: StateStopping})
 		if d.cancel != nil {
@@ -295,7 +322,7 @@ func (d *Daemon) handleConnection(ctx context.Context, connection net.Conn) {
 		}
 	case "install":
 		_ = encoder.Encode(Response{OK: true, Final: false, Event: "accepted", State: d.Snapshot().State})
-		err := d.install(ctx, request.AppPath, func(percent int, status string) {
+		app, err := d.install(ctx, request.AppPath, func(percent int, status string) {
 			_ = encoder.Encode(Response{OK: true, Final: false, Event: "progress", Percent: percent, Status: status})
 		})
 		if err != nil {
@@ -310,6 +337,8 @@ func (d *Daemon) handleConnection(ctx context.Context, connection net.Conn) {
 			State:        snapshot.State,
 			Generation:   snapshot.Generation,
 			InstallCount: snapshot.InstallCount,
+			AppReadback:  &AppReadback{App: app},
+			ObservedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 		})
 	case "uninstall":
 		_ = encoder.Encode(Response{OK: true, Final: false, Event: "accepted", State: d.Snapshot().State})
@@ -370,13 +399,10 @@ func (d *Daemon) Serve(parent context.Context) error {
 		go d.handleConnection(ctx, connection)
 	}
 	d.setState(StateStopping, "")
-	if d.location.snapshot(d.currentSession() != nil).Latitude != nil {
-		cleanup, end := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := d.location.clear(cleanup); err != nil {
-			slog.Warn(ServiceName + " location clear was not acknowledged")
-		}
-		end()
+	if d.config.Location != nil {
+		<-d.location.done
 	}
+
 	d.operationMu.Lock()
 	if session := d.currentSession(); session != nil {
 		_ = session.Close()

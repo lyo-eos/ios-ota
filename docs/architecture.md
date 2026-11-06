@@ -1,8 +1,8 @@
 # iOS OTA Architecture
 
-Document revision: `1.3.1-design.2`
+Document revision: `1.5.2`
 
-Revised: `2026-09-12`
+Revised: `2026-11-06`
 
 ## Decision
 
@@ -17,28 +17,89 @@ owner-only Unix socket. An explicitly configured location-only HTTPS endpoint
 accepts a device-scoped credential on the host Tailnet address. It cannot
 install/remove apps, read files, or invoke arbitrary developer services.
 
+## Exact App installation identity
+
+An installation is accepted only after InstallationProxy returns the requested
+bundle identifier, `CFBundleShortVersionString` and `CFBundleVersion` together.
+Read these three fields from the signed App before transfer. Require bounded,
+nonempty versions; reject missing or malformed metadata before sending bytes.
+Bundle presence alone cannot prove that an update replaced an older build.
+
+The final `installed` response contains `app` with exactly `bundle_identifier`,
+`version` and `build`, plus `observed_at` from the completed phone readback.
+No local path, signature material or app inventory is included. A mismatched,
+missing, duplicate or malformed device record is a failed installation; it
+must not increment the successful-install counter or report the requested
+version as observed. This receipt proves installed metadata, not App launch,
+UI behavior or the byte identity of every installed file.
+
+The owner-only `app-read` command takes one exact bundle identifier and returns
+that same three-field object, or null when absent. It reads the current phone
+through the existing paired tunnel under the daemon's operation lock; it never
+installs, removes, launches or returns other applications. A failed query is
+not an absent App. The read has a bounded service deadline and does not alter
+the install/uninstall counters. It permits an installer to reconcile a lost
+response without blindly repeating a side effect.
+
+The source baseline includes the previously deployed `lyo-proxy-location`
+branch through `d318d87`; retain its location ownership and recovery behavior.
+This release adds exact readback, not Chicago job arbitration. Central jobs,
+durable operation receipts and serialization across two Macs remain a separate
+integration boundary. Each Mac retains its own existing pairing and profile.
+
 ## iOS OTA location extension and naming
 
 The installed Mac service's canonical display name is **Lyo Nodus iOS OTA**,
 with technical slug `lyo-nodus-ios-ota`. Its executable, LaunchAgent label,
 plist basename and log basenames use that exact slug. The repository remains
-`ios-ota`; Link Core retains its upstream identity. The phone's separately
-persisted pairing name remains exactly **iOS OTA** and its identity is not
-rotated by this service release.
+`ios-ota`; Link Core retains its upstream identity. The MacBook's separately
+persisted pairing name remains **iOS OTA** and its identity is not rotated.
+The Mac mini has its own identity with the owner-selected phone pairing name
+**iOS OTA Mac Mini**. These are per-host pairing labels, not alternate service
+names or executable aliases.
 
-The daemon owns one LocationSimulation connection using Link Core's existing
-Instruments API. It uses the same paired tunnel, with fresh RSD identity checks.
-Set/update/clear have bounded deadlines. An unacknowledged set retains its
-requested target as uncertain so shutdown still attempts clear. Request cancellation and phone app
-background suspension do not end an accepted simulation. A five-second refresh
-checks the session. Failure is visible; reconnect never silently reapplies an
-old target. Service shutdown attempts clear before closing the outer tunnel.
+The daemon owns one requested location and one LocationSimulation connection over
+its existing paired tunnel. PUT and DELETE return HTTP 202 with the accepted
+state immediately; GET remains responsive during service discovery. A single
+worker applies the latest request, refreshes an active coordinate every five
+seconds and reopens a failed inner service while retaining the requested target.
+Tunnel loss marks the target recovering; a replacement authenticated OTA tunnel
+reapplies it. The target lasts until explicit Restore or daemon shutdown, not
+until the phone HTTP request, foreground session or one refresh ends. Nothing is
+persisted across daemon restarts.
+
+The Instruments socket belongs to the retained location driver. Opening uses
+a bounded cancellation link which is detached after successful negotiation;
+finishing a command never cancels that socket lifetime. Driver Close ends it.
+Each worker attempt has one 60-second context covering fresh RSD identity,
+Instruments channel negotiation and the command acknowledgement. Link Core
+propagates that context through channel creation and method calls, including
+connection cancellation; its old implicit five-second channel deadline is not
+used for this operation. A failed attempt reports recovering with its failed
+stage, never active. A current successful command is required for active/idle;
+fresh phone CoreLocation is still required for system verification.
+
+Restore immediately removes the requested target, cancels an obsolete in-flight
+set and makes the worker send stop until acknowledged. Revision checks prevent
+late replies from resurrecting an older target. Update supersedes the old
+coordinate the same way. Only the worker owns and closes the inner connection;
+HTTP/state locks never cover network I/O. Shutdown cancels the worker, which makes a bounded best-effort clear. The daemon
+joins it before closing the outer tunnel.
 
 The location listener uses TLS 1.3 and only a local Tailnet IPv4 address. A protected
 credential file supplies a certificate and a random device-scoped bearer token.
 `configure-location` exports URL, certificate SHA-256 and token for App import.
 Only GET/PUT/DELETE `/v1/location` are accepted. Credentials and coordinates are
 not logged. Existing profile pairing is reused; no new iPhone VPN is created.
+
+`refresh-location --profile ... --output ...` reissues the location certificate
+for the profile's current listener IP and exports a new private connection
+document. It preserves the existing private key, bearer token, pairing and
+profile. Stop the daemon before refreshing, then restart and import the new
+document on the phone. Startup rejects a certificate whose IP or validity does
+not match the configured listener, instead of presenting an unusable HTTPS
+endpoint as ready. Location errors are English. Certificate renewal and an
+authenticated state read are separate from a real location set/restore test.
 
 Set acknowledgement, fresh simulated CoreLocation, persistence with another
 app foreground, and fresh real location after clear are distinct evidence.
@@ -85,8 +146,8 @@ consumers already monitor its socket. This is one configured socket, not an alia
 Renaming the service does not rotate its RemotePairing identity. A local record
 passing validation and an open listener are prerequisites, not authentication
 proof. On `pair_verify_failed`, use the explicitly authorized device-initiated
-bootstrap documented in README. The exact component name is **iOS OTA** and its
-host identifier is independent of the Mac hostname and Xcode pairing. The
+bootstrap documented in README. Use the selected host's pairing label and a
+host identifier independent of the Mac hostname and Xcode pairing. The
 upstream exchange persists that identifier, IRK and keypair together; normal
 acquisition reuses the record without changing identity. Preserve the selected
 phone's configured profile and location credentials. Pairing acceptance requires
@@ -95,6 +156,49 @@ session to survive bootstrap exit. Pairing, Xcode reachability, installation
 readback and capture acceptance remain separate observations.
 
 ## Build and install ownership
+
+### Independent Mac bridges
+
+MacBook Air and Mac mini may each install the existing 1.3.2 bridge binary as
+their own per-user service. Each host owns a separate profile, control socket,
+RemotePairing identity and key material. Pair the Mac mini independently;
+do not copy the MacBook's pairing record or alter its trusted identity.
+Installing a binary does not establish a second authenticated bridge.
+
+Mac mini is intended as the persistent host while MacBook Air remains available
+for development and OS reinstallation. Select the host explicitly through its
+local CLI, using SSH when operating the other Mac. There is no automatic host
+discovery, failover or shared operation lock between the two daemons. Send app
+lifecycle and location operations through one selected host at a time; concurrent
+phone operations from separate bridges are not an accepted capability.
+
+Each host needs its own first authenticated session while the iPhone exposes
+RemotePairing on Wi-Fi. A second bridge does not provide cold acquisition on
+pure cellular networking or preserve a session interrupted by replacement of
+the phone's own VPN app. Lyo Proxy currently stores one Location host connection;
+changing that host requires an explicit profile import after the target bridge
+has been paired and its Location endpoint configured.
+
+Mac mini deployment acceptance must separately record binary installation,
+independent pairing, LaunchAgent activation and an authenticated active session.
+Do not disturb the MacBook bridge to validate installation on the Mac mini.
+
+On September 17, 2026, the existing 1.3.2 binary was installed on Mac mini.
+Device-initiated pairing used pymobiledevice3 11.12.4 in an isolated environment,
+a fresh host identifier and the requested **iOS OTA Mac Mini** name. The saved
+record matched that identity and retained its host IRK and intended phone ID.
+Its own profile and pairing record are mode 0600. The per-user LaunchAgent has
+RunAtLoad and KeepAlive enabled and reported running. After the pairing process
+exited, Mac mini reported `active`, generation 1, while MacBook Air remained
+`active`, generation 3, with its previous counters unchanged. No app install,
+location operation, VPN toggle or MacBook service restart was performed.
+
+The owner reported that **iOS OTA Mac Mini** was absent from the phone's paired
+Mac list after pairing. The outgoing handshake and signed pairing information
+both use the requested name, but phone-side list retention is not accepted.
+A refreshed list readback is pending; successful transport authentication must
+not be reported as proof of the phone's display or attributed to an iOS display
+bug without evidence. Keep both working identities intact during diagnosis.
 
 | Stage | Authority |
 | --- | --- |
@@ -105,7 +209,7 @@ readback and capture acceptance remain separate observations.
 | Warm session | The long-running iOS OTA daemon |
 | App transfer | Streaming zip conduit over the live RSD session |
 | App removal | InstallationProxy for one explicit bundle identifier |
-| Success readback | InstallationProxy bundle presence or absence enumeration |
+| Success readback | InstallationProxy exact bundle/version/build, or verified absence for removal |
 
 iOS OTA consumes an existing signed `.app`. It does not become an Xcode Run
 Destination, select a signing team, modify a project, or weaken iOS signature
@@ -145,9 +249,36 @@ causes iOS to expose RemotePairing again.
 
 ## Source and dependency boundary
 
-- Public source mirror:
-  `zjz-connect/ios-ota`;
-- Git fetch authority: `/srv/contabo/git/ios-ota.git`;
+### Userspace tunnel bulk transfer, 1.5.1
+
+The maintained Link Core patch uses a 16,384-packet outbound queue and enables
+`tcpip.TCPSACKEnabled` on its userspace TCP stack. The previous 1,024-packet
+channel could fill during a bulk write and discard packets before the reliable
+outer transport delivered them. SACK permits recovery of multiple gaps without
+serial loss recovery across successive round trips. The queue remains bounded;
+its larger burst allowance does not guarantee lossless behavior for every
+traffic pattern. The existing single tunnel and ownership model remain in force.
+
+Upstream PR #2 changes only the downstream patch. Accept it against current
+`main` with the normal affected-package, project, race and vet gates. Retain
+the external contributor's source history. A release also receives its own
+module identity and CI result; contributor measurements are not deployment
+acceptance for the owner's phone or cellular network.
+
+The tested Darwin ARM64 binary, source commit, patch digest and release receipt
+are published to digest-qualified keys in Chicago Garage bucket `repos` before
+distribution. Both Macs receive that exact artifact from Chicago. Validate the
+existing profile, service ownership, idle phone-operation state and reachable
+RemotePairing listener before each sequential daemon activation. Preserve the
+other Mac's active tunnel while one is replaced. Verify each installed version,
+new active tunnel and independent exact App readback. Chicago stores and
+distributes the Mac release; it does not run a Darwin daemon or acquire another
+pairing identity. No central job scheduler is added by this release.
+
+- Sole Git authority: `https://github.com/lyo-eos/ios-ota.git`, branch `main`;
+- Secondary Git backup: `win-desktop-codex:N:/Git/ios-ota.git`, the same bare
+  repository visible at `/Volumes/NAS/Git/ios-ota.git`. Ordinary pushes publish
+  to GitHub first and NAS second. Contabo has no source or release role;
 - Go toolchain: `1.26.5` for macOS arm64;
 - Link Core upstream: `danielpaulus/go-ios` commit
   `3ebc297691a9e364772aef027744ebc0c49421a5`;
@@ -268,3 +399,61 @@ The host accepts only pinned TLS 1.3 requests from the authenticated client.
 The phone needs a narrowly scoped ATS exception for Tailnet IPv4 because iOS
 17+ otherwise disallows relaxing IP-certificate trust to this private anchor.
 No phone-side VPN configuration is created by location.
+
+### Location renewal acceptance (2026-09-17)
+
+`go test -race ./internal/linkcore ./cmd/lyo-nodus-ios-ota` passed. The service was upgraded to 1.3.2 and its existing certificate refreshed for 100.87.87.50:61443, preserving the key, token and device profile. Normal certificate/hostname verification and authenticated GET returned HTTP 200 with phase idle. The owner-only connection document was staged into the installed phone app Documents/lyo-proxy-location.json through its paired CoreDevice channel. Phone import and a fresh system-location mutation were not exercised.
+
+### Persistent Location 1.4.0 verification (2026-09-17)
+
+The previous read-only service probe required 11.874 seconds before any location
+command, exceeding the old ten-second HTTP mutation budget. The fixed design
+accepts intent immediately and gives the host worker one deadline through RSD,
+channel negotiation and command reply. The complete scripts/test.sh passed
+(upstream affected packages, service tests, race tests and vet). Additional DTX
+race tests passed for caller-owned deadlines, blocked-write cancellation and
+peer disconnect. Service tests cover refresh recovery, replacement tunnels,
+Restore racing with a late Set, superseding slow discovery, pending failed
+Restore and HTTP cancellation while discovery is blocked.
+
+The inspected 1.4.0 binary was activated on MacBook using the existing profile,
+LaunchAgent, certificate, token and pairing. The new daemon acquired generation
+1. Live Restore and target-persistence acceptance are in progress; source tests
+and service readiness do not establish physical CoreLocation acceptance.
+
+The intermediate 1.4.0 live Restore was accepted in 0.046 seconds and reached
+idle after 32.292 seconds during an OTA app transfer. Subsequent lifecycle review
+found that Link Core's context-bound socket still inherited the attempt lifetime;
+that ownership defect is removed in 1.4.1. A real TCP/DTX fixture must verify the
+same socket accepts further commands after the opening and first-command
+contexts are cancelled. This intermediate release is not persistent acceptance.
+
+The 1.4.1 complete test entry passed, including the real TCP/DTX lifetime test.
+The Instruments and DTX location cases also passed under the race detector.
+The existing MacBook LaunchAgent now runs the inspected 1.4.1 binary. Activation
+waited for the old job to finish removal before bootstrap; the profile, pairing
+and TLS authority were preserved. The current target was captured immediately
+before activation and submitted to the new daemon. 41 consecutive active status samples spanned 86.89 seconds with the same command
+timestamp and no error; the owner subsequently confirmed tested system readback.
+The phone's installed 0.16.0 (35) identity was independently read through
+InstallationProxy. Optional native background/relaunch testing was not accepted:
+iOS cancelled LocalAuthentication before the test executed, and that run was
+cancelled after the owner confirmed their manual test. The current target remains
+active. Detailed receipts are under the Lyo Proxy checkout .build/location/.
+
+## OTA 1.5.0 service acceptance, 2026-11-04
+
+Source `499a45c` is installed at the canonical executable on Mac mini and
+MacBook Air. The versioned artifact passed strict codesign verification. Each
+activation checked the preceding installed identity, an active tunnel with no
+install/uninstall operation and a reachable Apple listener. The existing
+LaunchAgent, profile, pairing record and socket paths remain unchanged; Air
+retains its configured location driver. One Mac retained its tunnel while the
+other daemon was replaced.
+
+Both new daemons recovered to active generation 1 and answered the newly added
+`app-read`. Mini read `dev.lyo.nodus` 2.69.4 (251) at 06:11:09 UTC; Air independently
+read the same identity at 06:12:18 UTC. These observations accept the service
+upgrades and exact installed-App lookup. No App installation, launch, capture or
+new location effect was performed in this boundary. Nodus candidate signing
+still requires the existing Air Keychain permission; it is not an OTA failure.

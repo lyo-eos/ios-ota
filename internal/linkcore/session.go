@@ -119,7 +119,7 @@ func (s *Session) Done() <-chan error {
 }
 
 func (s *Session) browseUserApps(ctx context.Context) ([]installationproxy.AppInfo, error) {
-	proxy, err := installationproxy.New(s.device)
+	proxy, err := installationproxy.NewWithContext(ctx, s.device)
 	if err != nil {
 		return nil, err
 	}
@@ -142,10 +142,44 @@ func (s *Session) browseUserApps(ctx context.Context) ([]installationproxy.AppIn
 	}
 }
 
-func (s *Session) Install(ctx context.Context, app AppBundle, progress func(int, string)) error {
+func (s *Session) ReadApp(ctx context.Context, bundleIdentifier string) (*AppIdentity, error) {
+	apps, err := s.browseUserApps(ctx)
+	if err != nil {
+		return nil, coded("app_read_failed", "InstallationProxy App query failed", err)
+	}
+	return appFromReadback(apps, bundleIdentifier)
+}
+
+func appFromReadback(apps []installationproxy.AppInfo, bundleIdentifier string) (*AppIdentity, error) {
+	var result *AppIdentity
+	for _, app := range apps {
+		if !validBundleIdentifier(app.CFBundleIdentifier()) {
+			return nil, coded("app_read_invalid", "InstallationProxy returned an invalid App identifier", nil)
+		}
+		if app.CFBundleIdentifier() != bundleIdentifier {
+			continue
+		}
+		build, _ := app[installationproxy.CFBundleVersion].(string)
+		identity := AppIdentity{BundleIdentifier: app.CFBundleIdentifier(), Version: app.CFBundleShortVersionString(), Build: build}
+		if result != nil || !identity.valid() {
+			return nil, coded("app_read_invalid", "InstallationProxy returned invalid or repeated App metadata", nil)
+		}
+		result = &identity
+	}
+	return result, nil
+}
+
+func verifyInstalledApp(expected AppIdentity, actual *AppIdentity) error {
+	if !expected.valid() || actual == nil || *actual != expected {
+		return coded("install_failed", "InstallationProxy did not confirm the requested bundle, version and build", nil)
+	}
+	return nil
+}
+
+func (s *Session) Install(ctx context.Context, app AppBundle, progress func(int, string)) (*AppIdentity, error) {
 	conduit, err := zipconduit.New(s.device)
 	if err != nil {
-		return coded("install_failed", "could not connect to streaming zip conduit", err)
+		return nil, coded("install_failed", "could not connect to streaming zip conduit", err)
 	}
 	installResult := make(chan error, 1)
 	go func() {
@@ -154,28 +188,23 @@ func (s *Session) Install(ctx context.Context, app AppBundle, progress func(int,
 	select {
 	case <-ctx.Done():
 		_ = conduit.Close()
-		return coded("install_failed", "installation timed out", ctx.Err())
+		return nil, coded("install_failed", "installation timed out", ctx.Err())
 	case err := <-installResult:
 		_ = conduit.Close()
 		if err != nil {
-			return coded("install_failed", "iOS rejected or interrupted the app transfer", err)
+			return nil, coded("install_failed", "iOS rejected or interrupted the app transfer", err)
 		}
 	}
 
-	apps, err := s.browseUserApps(ctx)
+	installed, err := s.ReadApp(ctx, app.BundleIdentifier)
 	if err != nil {
-		return coded("install_failed", "post-install InstallationProxy readback failed", err)
+		return nil, coded("install_failed", "post-install InstallationProxy readback failed", err)
 	}
-	for _, installed := range apps {
-		if installed.CFBundleIdentifier() == app.BundleIdentifier {
-			return nil
-		}
-	}
-	return coded("install_failed", "installed bundle was absent from InstallationProxy readback", errors.New(app.BundleIdentifier))
+	return installed, nil
 }
 
 func (s *Session) Uninstall(ctx context.Context, bundleIdentifier string) error {
-	proxy, err := installationproxy.New(s.device)
+	proxy, err := installationproxy.NewWithContext(ctx, s.device)
 	if err != nil {
 		return coded("uninstall_failed", "could not connect to InstallationProxy", err)
 	}

@@ -20,6 +20,7 @@ type Request struct {
 }
 
 type Response struct {
+	*AppReadback
 	ResultPath      string `json:"result_path,omitempty"`
 	TestCount       int    `json:"test_count,omitempty"`
 	ScreenshotCount int    `json:"screenshot_count,omitempty"`
@@ -48,6 +49,11 @@ type Snapshot struct {
 	InstallCount   uint64
 	UninstallCount uint64
 	LastErrorCode  string
+}
+
+// A non-nil readback distinguishes a confirmed absent App from no query.
+type AppReadback struct {
+	App *AppIdentity `json:"app"`
 }
 
 func snapshotResponse(snapshot Snapshot) Response {
@@ -209,9 +215,9 @@ func validateCommand(request Request) error {
 		if request.AppPath == "" || request.BundleIdentifier != "" {
 			return coded("control_request_invalid", "install requires app_path", nil)
 		}
-	case "uninstall":
+	case "uninstall", "app-read":
 		if request.AppPath != "" || !validBundleIdentifier(request.BundleIdentifier) {
-			return coded("control_request_invalid", "uninstall requires one exact valid bundle_identifier", nil)
+			return coded("control_request_invalid", request.Command+" requires one exact valid bundle_identifier", nil)
 		}
 	default:
 		return coded("control_request_invalid", "unknown command", nil)

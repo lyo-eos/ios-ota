@@ -12,7 +12,7 @@ module_cache="${cache_directory}/go-mod"
 (
   cd "${source_root}"
   GOWORK="${workspace_file}" GOCACHE="${go_cache}" GOMODCACHE="${module_cache}" \
-    "${go_binary}" test ./ios ./ios/tunnel ./ios/installationproxy ./ios/zipconduit ./ios/dtx_codec ./ios/testmanagerd ./ios/appservice ./ios/openstdio ./ios/nskeyedarchiver
+    "${go_binary}" test ./ios ./ios/tunnel ./ios/installationproxy ./ios/zipconduit ./ios/dtx_codec ./ios/instruments ./ios/testmanagerd ./ios/appservice ./ios/openstdio ./ios/nskeyedarchiver
 )
 (
   cd "${module_directory}"

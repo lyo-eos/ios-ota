@@ -8,6 +8,7 @@ func TestValidateCommand(t *testing.T) {
 		{Command: "stop"},
 		{Command: "install", AppPath: "/tmp/Test.app"},
 		{Command: "uninstall", BundleIdentifier: "lyo.nodus"},
+		{Command: "app-read", BundleIdentifier: "lyo.nodus"},
 	}
 	for _, request := range accepted {
 		if err := validateCommand(request); err != nil {
@@ -24,6 +25,9 @@ func TestValidateCommand(t *testing.T) {
 		{Command: "uninstall", AppPath: "/tmp/Test.app", BundleIdentifier: "lyo.nodus"},
 		{Command: "status", AppPath: "/tmp/Test.app"},
 		{Command: "status", BundleIdentifier: "lyo.nodus"},
+		{Command: "app-read"},
+		{Command: "app-read", BundleIdentifier: "*"},
+		{Command: "app-read", AppPath: "/tmp/Test.app", BundleIdentifier: "lyo.nodus"},
 	}
 	for _, request := range rejected {
 		if err := validateCommand(request); errorCode(err) != "control_request_invalid" {
