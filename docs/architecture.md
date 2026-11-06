@@ -1,6 +1,6 @@
 # iOS OTA Architecture
 
-Document revision: `1.5.2`
+Document revision: `1.5.3`
 
 Revised: `2026-11-06`
 
@@ -440,6 +440,67 @@ InstallationProxy. Optional native background/relaunch testing was not accepted:
 iOS cancelled LocalAuthentication before the test executed, and that run was
 cancelled after the owner confirmed their manual test. The current target remains
 active. Detailed receipts are under the Lyo Proxy checkout .build/location/.
+
+## OTA 1.5.1 Chicago publication and Mini acceptance, 2026-11-06
+
+[PR #2](https://github.com/lyo-zjz/ios-ota/pull/2) was updated against current
+main and merged as `8d2fb17d634582423766b600c150c4876bd094de`, preserving the
+contributor's commit. The external-contributor workflow was approved after
+review; the obsolete original run was cancelled. The updated PR's
+[CI run 42182431721](https://github.com/lyo-zjz/ios-ota/actions/runs/42182431721)
+passed. Merge CI also passed. Release source
+`02d04ff281de13148f93e5ce10f1d5d401b81ae6` declares module version **1.5.1**;
+its [CI run 42182878183](https://github.com/lyo-zjz/ios-ota/actions/runs/42182878183)
+passed. The normal local `scripts/test.sh` passed all affected Link Core and
+project packages, project race tests and vet. No phone transfer benchmark was
+performed here; the contributor's measured 61% remains its own same-Wi-Fi result.
+
+The normal pinned Go 1.26.5 build on Mac mini produced a strictly verified,
+ad-hoc-signed Darwin ARM64 executable of **10,615,200 bytes**, SHA-256
+`13afc4af1d71b7ee82a6c0ffec120a30ac8f890037d010d72e0728c87ca70f65`.
+The pinned Link Core commit remains `3ebc297691a9e364772aef027744ebc0c49421a5`;
+the patched source digest is
+`34a0019587bcde83fc9e41c9bffbb97c3a757d968c4a4e1c523cacdbf84c0756`.
+Chicago published and fully read back that executable in Garage bucket `repos`:
+
+`lyo-nodus/releases/ios-ota/1.5.1/13afc4af1d71b7ee82a6c0ffec120a30ac8f890037d010d72e0728c87ca70f65.darwin-arm64`
+
+The adjacent `.release.json`, `.test.log` and `.mac-mini.acceptance.json`
+objects hold immutable provenance, verification and installation evidence.
+Mini received the binary retrieved from Chicago's Garage readback, rather than
+installing a separately rebuilt copy. Chicago did not install or run the Mac
+daemon. Its existing Fleet artifact-store client provided the controlled object
+access; the provider software catalog and server runtimes were not changed.
+
+At `2026-11-06T07:49:40.197490Z`, Mini accepted **1.5.1**, replacing daemon PID
+68118 with PID 19339. The existing LaunchAgent, profile, pairing identity and
+control-socket configuration were preserved. The new daemon was `active`,
+generation 1. Independent InstallationProxy readback through its new tunnel
+confirmed `dev.lyo.nodus` **2.81.1 (275)**. Core and native App Server process
+identities and creation times were unchanged. This is daemon/tunnel/readback
+acceptance; no App installation, UI launch or new location effect is claimed.
+
+Mini's existing `doctor` reports `tailscale CLI is missing` because the official
+Tailscale executable is absent. It still verified build metadata, profile and
+pair-record protection. Direct TCP connection to the configured RemotePairing
+listener and authenticated App readback both succeeded before activation, and
+the new tunnel plus readback succeeded afterward. The diagnostic CLI limitation
+is recorded separately from the demonstrated private route and Apple session;
+no Tailscale installation or doctor implementation change was made.
+
+MacBook Air was unreachable over both direct SSH and the Chicago jump path.
+The user explicitly deferred waking it and requested completion of the other
+steps. **Air is not upgraded or accepted by this release.** Its identical
+artifact and receipts are ready in Chicago; its last accepted version is 1.5.0,
+not a live version observation from this run. Distribution/activation and
+independent phone readback remain pending until that Mac returns. Do not report
+both Macs as updated or its retained location state as inspected.
+
+One release owner held Chicago lease
+`a262f3f9-f714-4466-b852-ba955219ab25` from `07:45:45.222604Z` through
+`07:51:20.279533Z`. It was released after publication, Mini installation and
+receipt readback. Source, contract and acceptance commits are delivered by
+ordinary push to GitHub first and the NAS bare backup second.
 
 ## OTA 1.5.0 service acceptance, 2026-11-04
 
