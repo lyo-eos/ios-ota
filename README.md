@@ -1,6 +1,6 @@
 # iOS OTA
 
-Documentation revision: `1.5.0`.
+Documentation revision: `1.5.1`.
 
 Mac background service: **Lyo Nodus iOS OTA** (`lyo-nodus-ios-ota`).
 The existing MacBook pairing remains **iOS OTA**. The independently paired
@@ -35,6 +35,16 @@ signed .app -> iOS OTA CLI -> owner-only Unix socket
 ```
 
 ### Exact installed version
+
+Version `1.5.1` increases the userspace tunnel's bounded outbound queue from
+1,024 to 16,384 packets and enables TCP selective acknowledgements (SACK).
+This reduces avoidable local queue drops and improves recovery during bulk
+transfers. The contributor measured a 61% average improvement on one same-Wi-Fi
+64 MB AFC workload; other networks require their own measurements.
+
+Release binaries and receipts are published through Chicago's Garage `repos`
+storage before delivery to the two Macs. The daemon itself runs on macOS;
+Chicago owns the published artifact, not either Mac's Apple pairing or tunnel.
 
 `install` verifies the signed App and accepts success only when the phone
 reports the same bundle identifier, version and build. Query that identity

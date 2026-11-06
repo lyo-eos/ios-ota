@@ -1,8 +1,8 @@
 # iOS OTA Architecture
 
-Document revision: `1.5.1`
+Document revision: `1.5.2`
 
-Revised: `2026-11-03`
+Revised: `2026-11-06`
 
 ## Decision
 
@@ -248,6 +248,32 @@ session terminates while the phone is cold on 5G, the daemon waits until Wi-Fi
 causes iOS to expose RemotePairing again.
 
 ## Source and dependency boundary
+
+### Userspace tunnel bulk transfer, 1.5.1
+
+The maintained Link Core patch uses a 16,384-packet outbound queue and enables
+`tcpip.TCPSACKEnabled` on its userspace TCP stack. The previous 1,024-packet
+channel could fill during a bulk write and discard packets before the reliable
+outer transport delivered them. SACK permits recovery of multiple gaps without
+serial loss recovery across successive round trips. The queue remains bounded;
+its larger burst allowance does not guarantee lossless behavior for every
+traffic pattern. The existing single tunnel and ownership model remain in force.
+
+Upstream PR #2 changes only the downstream patch. Accept it against current
+`main` with the normal affected-package, project, race and vet gates. Retain
+the external contributor's source history. A release also receives its own
+module identity and CI result; contributor measurements are not deployment
+acceptance for the owner's phone or cellular network.
+
+The tested Darwin ARM64 binary, source commit, patch digest and release receipt
+are published to digest-qualified keys in Chicago Garage bucket `repos` before
+distribution. Both Macs receive that exact artifact from Chicago. Validate the
+existing profile, service ownership, idle phone-operation state and reachable
+RemotePairing listener before each sequential daemon activation. Preserve the
+other Mac's active tunnel while one is replaced. Verify each installed version,
+new active tunnel and independent exact App readback. Chicago stores and
+distributes the Mac release; it does not run a Darwin daemon or acquire another
+pairing identity. No central job scheduler is added by this release.
 
 - Sole Git authority: `https://github.com/lyo-eos/ios-ota.git`, branch `main`;
 - Secondary Git backup: `win-desktop-codex:N:/Git/ios-ota.git`, the same bare
